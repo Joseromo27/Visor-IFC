@@ -44,7 +44,7 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
           key: ${{ matrix.platform }}-${{ matrix.rust-targets }}

@@ -12,6 +12,7 @@ public/fragments-worker.mjs
 # Claves de firma del actualizador: nunca deben entrar al repositorio
 *.key
 *.key.pub
+*.password
 
 # Entorno local
 .env

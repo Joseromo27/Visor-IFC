@@ -62,13 +62,22 @@ Push-Location (Split-Path $PSScriptRoot -Parent)
 try {
   if ($Build) {
     # Firma de las actualizaciones. Sin la clave, el build igual produce
-    # instaladores, pero sin el latest.json que necesita el actualizador.
+    # instaladores, pero sin las firmas ni el latest.json que necesita el
+    # actualizador.
+    #
+    # La clave tiene contrasena a proposito. PowerShell no puede exportar una
+    # variable de entorno vacia — asignarle '' la borra —, asi que con una
+    # clave sin contrasena el CLI de Tauri no encuentra
+    # TAURI_SIGNING_PRIVATE_KEY_PASSWORD y se queda esperando en un prompt que
+    # nunca se responde.
     $keyPath = "$env:USERPROFILE\.tauri\visor-ifc.key"
-    if (Test-Path $keyPath) {
+    $passPath = "$env:USERPROFILE\.tauri\visor-ifc.password"
+
+    if ((Test-Path $keyPath) -and (Test-Path $passPath)) {
       $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $keyPath -Raw
-      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content $passPath -Raw).Trim()
     } else {
-      Write-Warning "No se encontro $keyPath; los artefactos saldran sin firmar."
+      Write-Warning "Falta $keyPath o $passPath; los artefactos saldran sin firmar y sin latest.json."
     }
     npm run tauri build
   } else {

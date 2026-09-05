@@ -130,12 +130,21 @@ y ofrece actualizar. Para que funcione, el repositorio necesita dos secretos:
 
 | Secreto | Contenido |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | contenido de la clave privada generada con `npm run tauri signer generate` |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | su contrasena, o vacio si se genero sin una |
+| `TAURI_SIGNING_PRIVATE_KEY` | contenido completo de `visor-ifc.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | contenido de `visor-ifc.password` |
 
-La clave publica correspondiente ya esta en `src-tauri/tauri.conf.json`. **La
-clave privada no debe entrar al repositorio**: si se pierde, ninguna version
-futura podra firmarse de forma que las instalaciones existentes la acepten.
+Ambos archivos estan en la carpeta `.tauri` del perfil del usuario.
+
+La clave publica correspondiente ya esta en `src-tauri/tauri.conf.json`. **Ni la
+clave privada ni su contrasena deben entrar al repositorio**: si se pierden,
+ninguna version futura podra firmarse de forma que las instalaciones existentes
+la acepten, y habria que redistribuir el instalador a mano.
+
+La clave se genero **con contrasena** deliberadamente. PowerShell no puede
+exportar una variable de entorno vacia — asignarle `''` la borra —, asi que con
+una clave sin contrasena el CLI de Tauri no encuentra
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` y el build se cuelga en un prompt
+interactivo que en CI nadie responde.
 
 Para publicar una version:
 

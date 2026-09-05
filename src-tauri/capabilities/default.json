@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permisos del visor: dialogo nativo de archivos, cache de Fragments en la carpeta de datos de la app y actualizacion automatica.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:allow-open",
+    "dialog:allow-message",
+    "fs:allow-applocaldata-read-recursive",
+    "fs:allow-applocaldata-write-recursive",
+    "fs:allow-applocaldata-meta-recursive",
+    "updater:default",
+    "process:allow-restart",
+    "log:default",
+    "process:allow-exit"
+  ]
+}

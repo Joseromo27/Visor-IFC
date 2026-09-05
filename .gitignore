@@ -1,0 +1,30 @@
+# Dependencias y salidas de build
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Assets copiados desde node_modules por scripts/copy-assets.mjs
+public/wasm/
+public/fragments-worker.mjs
+
+# Claves de firma del actualizador: nunca deben entrar al repositorio
+*.key
+*.key.pub
+
+# Entorno local
+.env
+.env.local
+*.local
+
+# Editores y sistema operativo
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,45 @@
+[package]
+name = "visor-ifc"
+version = "0.1.0"
+description = "Visor de archivos IFC"
+authors = ["LEN"]
+license = ""
+repository = "https://github.com/Joseromo27/Visor-IFC"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "visor_ifc_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+# El visor maneja modelos de ~1 GB: sin optimizar, la conversion y el
+# volcado a disco son inaceptablemente lentos incluso en debug.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

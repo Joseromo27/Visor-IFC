@@ -48,8 +48,23 @@ export default function SelfTest({ path }: { path: string }) {
 
         // --- Conversion (o lectura de cache) ---
         const stages = new Set<string>()
+        const muestras: { stage: string; pct: number }[] = []
+        let retrocesos = 0
+        let ultimo = -1
+
         const t0 = performance.now()
-        const result = await loadIfc(path, (p) => stages.add(p.stage))
+        const result = await loadIfc(path, (p) => {
+          stages.add(p.stage)
+          if (p.progress === null) return
+          const pct = Math.round(p.progress * 100)
+          // La barra no debe retroceder nunca: el avance crudo del conversor
+          // no es monotono y se remapea en el worker.
+          if (pct < ultimo) retrocesos += 1
+          ultimo = pct
+          if (muestras.length === 0 || pct !== muestras[muestras.length - 1].pct) {
+            muestras.push({ stage: p.stage, pct })
+          }
+        })
         const elapsed = performance.now() - t0
 
         check(
@@ -64,6 +79,18 @@ export default function SelfTest({ path }: { path: string }) {
         )
         if (!result.fromCache) {
           check(stages.size > 0, 'se reportaron etapas de progreso', [...stages].join(', '))
+          check(
+            retrocesos === 0,
+            'la barra de progreso nunca retrocede',
+            `${muestras.length} valores distintos, ${retrocesos} retrocesos`,
+          )
+          check(ultimo >= 99, 'el progreso llega al final', `termina en ${ultimo}%`)
+          say(
+            `recorrido: ${muestras
+              .filter((_, i) => i % Math.max(1, Math.ceil(muestras.length / 12)) === 0)
+              .map((m) => `${m.stage}:${m.pct}%`)
+              .join(' -> ')}`,
+          )
         }
 
         // --- Escena ---

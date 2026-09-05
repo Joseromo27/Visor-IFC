@@ -30,7 +30,16 @@ export interface LoadProgress {
   stage: Stage
   /** Fraccion 0..1, o `null` cuando la etapa no es medible. */
   progress: number | null
-  detail?: string
+  /** Bytes del IFC leidos hasta ahora, si la etapa los mueve. */
+  bytesRead?: number
+  totalBytes?: number
+  /** Entidades IFC procesadas y clase en curso. */
+  entities?: number
+  ifcClass?: string
+  /** Milisegundos desde que empezo la carga. */
+  elapsedMs?: number
+  /** Estimacion de lo que falta. `null` cuando todavia no es fiable. */
+  etaMs?: number | null
 }
 
 export interface LoadResult {
@@ -104,10 +113,15 @@ function makeChunkServer(
   path: string,
   ctrl: SharedArrayBuffer,
   data: SharedArrayBuffer,
+  onBytes: (bytesRead: number) => void,
 ) {
   const i32 = new Int32Array(ctrl)
   const f64 = new Float64Array(ctrl)
   const shared = new Uint8Array(data)
+
+  // Se sigue la posicion mas avanzada, no la suma de trozos: web-ifc puede
+  // releer zonas ya vistas y sumarlas daria mas del tamano del archivo.
+  let furthest = 0
 
   return async () => {
     const offset = f64[F_OFFSET]
@@ -122,6 +136,9 @@ function makeChunkServer(
       const view = new Uint8Array(chunk)
       shared.set(view, 0)
       Atomics.store(i32, I_BYTES_RETURNED, view.byteLength)
+
+      furthest = Math.max(furthest, offset + view.byteLength)
+      onBytes(furthest)
     } catch (err) {
       console.error('read_chunk fallo', err)
       Atomics.store(i32, I_ERROR, 1)
@@ -169,6 +186,7 @@ async function readWholeFile(
 /** Convierte el IFC a Fragments en un worker, informando el avance. */
 function convertInWorker(
   path: string,
+  totalBytes: number,
   onProgress: (p: LoadProgress) => void,
 ): Promise<{ fragments: Uint8Array; elapsedMs: number }> {
   return new Promise((resolve, reject) => {
@@ -176,6 +194,36 @@ function convertInWorker(
       new URL('../workers/ifcConverter.worker.ts', import.meta.url),
       { type: 'module' },
     )
+
+    const startedAt = performance.now()
+    let bytesRead = 0
+    let lastByteReport = 0
+    // web-ifc lee y parsea el archivo entero antes de construir geometria.
+    // Una vez que llega el primer avance de conversion se dejan de publicar
+    // los avisos de lectura, o la barra alternaria entre dos etapas distintas.
+    let conversionStarted = false
+
+    // Lectura y conversion son fases con escalas independientes: cada una va
+    // de 0 a 1 por su cuenta. Se reparten un unico recorrido para que la barra
+    // avance de principio a fin sin reiniciarse a mitad de camino. El cuarto
+    // asignado a la lectura no es solo E/S: dentro va el parseo del STEP, que
+    // en modelos grandes pesa lo suyo.
+    const PESO_LECTURA = 0.25
+
+    // Red de seguridad: pase lo que pase aguas arriba, la barra no retrocede.
+    let ultimo = 0
+    const monotono = (v: number) => {
+      ultimo = Math.min(1, Math.max(ultimo, v))
+      return ultimo
+    }
+
+    /**
+     * Tiempo restante estimado. Solo a partir de un 3 % de avance: antes de
+     * eso el ritmo todavia no se ha estabilizado y la cifra bailaria tanto que
+     * seria peor que no mostrar nada.
+     */
+    const eta = (fraction: number, elapsed: number) =>
+      fraction > 0.03 ? (elapsed / fraction) * (1 - fraction) : null
 
     let serveChunk: (() => Promise<void>) | null = null
 
@@ -193,9 +241,34 @@ function convertInWorker(
         case 'chunk-request':
           void serveChunk?.()
           break
-        case 'progress':
-          onProgress({ stage: msg.stage, progress: msg.progress })
+        case 'progress': {
+          // "conversion" es solo el marcador de arranque y llega antes de leer
+          // un solo byte; si contara como inicio de la conversion, el contador
+          // de lectura quedaria silenciado durante toda la fase de parseo, que
+          // en un modelo de 1 GB es precisamente la mas larga.
+          if (msg.stage !== 'conversion') conversionStarted = true
+          const elapsedMs = performance.now() - startedAt
+
+          // El marcador de arranque no debe consumir el tramo de lectura: si
+          // se mapeara por la escala de conversion saltaria al 25 % antes de
+          // leer un byte y la barra se quedaria congelada ahi durante todo el
+          // parseo, que con 1 GB son varios minutos.
+          const esArranque = msg.stage === 'conversion' && msg.progress <= 0
+
+          onProgress({
+            stage: msg.stage,
+            progress: esArranque
+              ? monotono(0)
+              : monotono(PESO_LECTURA + msg.progress * (1 - PESO_LECTURA)),
+            bytesRead,
+            totalBytes,
+            entities: msg.entities,
+            ifcClass: msg.ifcClass,
+            elapsedMs,
+            etaMs: eta(ultimo, elapsedMs),
+          })
           break
+        }
         case 'done':
           finish(() =>
             resolve({ fragments: msg.fragments, elapsedMs: msg.elapsedMs }),
@@ -209,7 +282,28 @@ function convertInWorker(
 
     if (bridgeAvailable()) {
       const bridge = createBridge()
-      serveChunk = makeChunkServer(path, bridge.ctrl, bridge.data)
+      serveChunk = makeChunkServer(path, bridge.ctrl, bridge.data, (read) => {
+        bytesRead = read
+        // Durante el parseo inicial el conversor no emite avance propio, asi
+        // que estos avisos son lo unico que mueve la barra. Se limitan igual,
+        // porque un IFC de 1 GB son cientos de trozos.
+        if (conversionStarted) return
+        const now = performance.now()
+        if (now - lastByteReport < 150 && read < totalBytes) return
+        lastByteReport = now
+
+        const elapsedMs = now - startedAt
+        const fraction = totalBytes > 0 ? read / totalBytes : 0
+        const overall = monotono(fraction * PESO_LECTURA)
+        onProgress({
+          stage: 'lectura',
+          progress: overall,
+          bytesRead: read,
+          totalBytes,
+          elapsedMs,
+          etaMs: eta(overall, elapsedMs),
+        })
+      })
       const req: ConvertRequest = {
         type: 'convert',
         path,
@@ -257,7 +351,11 @@ export async function loadIfc(
     }
   }
 
-  const { fragments, elapsedMs } = await convertInWorker(path, onProgress)
+  const { fragments, elapsedMs } = await convertInWorker(
+    path,
+    info.size,
+    onProgress,
+  )
 
   // Guardar el resultado no debe hacer fallar la carga: si el disco esta lleno
   // o la carpeta no es escribible, el modelo ya esta listo para mostrarse.

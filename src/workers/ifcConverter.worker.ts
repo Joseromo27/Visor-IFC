@@ -32,9 +32,61 @@ export type ConvertRequest = {
 
 export type WorkerOut =
   | { type: 'chunk-request' }
-  | { type: 'progress'; progress: number; stage: ProgressData['process'] }
+  | {
+      type: 'progress'
+      /** Fraccion 0..1 monotona sobre el total del trabajo. */
+      progress: number
+      stage: ProgressData['process']
+      /** Clase IFC que se esta procesando, si el conversor la informa. */
+      ifcClass?: string
+      /** Acumulado de entidades procesadas. */
+      entities: number
+    }
   | { type: 'done'; fragments: Uint8Array; elapsedMs: number }
   | { type: 'error'; message: string }
+
+/**
+ * Convierte el avance que informa el conversor en una fraccion monotona.
+ *
+ * El valor crudo no sirve tal cual: son dos pasadas con escalas
+ * independientes. La de geometria recorre 0..1 y, al empezar la de
+ * serializacion, el valor vuelve a 0,6 y sube hasta 1. Enchufado directo a una
+ * barra, esta llegaria al 100 %, retrocederia al 60 % y volveria a subir, lo
+ * que en un modelo de varios minutos parece que la aplicacion se colgo y
+ * reinicio el trabajo.
+ *
+ * Los tramos reparten el total dando mas peso a la geometria, que es con
+ * diferencia lo que mas tarda en modelos grandes.
+ */
+function makeProgressMapper() {
+  let last = 0
+
+  return (raw: number, stage: ProgressData['process']): number => {
+    let overall: number
+
+    switch (stage) {
+      case 'geometries':
+        // Crudo 0..1 -> 0..0,65
+        overall = raw * 0.65
+        break
+      case 'attributes':
+        // Crudo 0,60..0,75 -> 0,65..0,90
+        overall = 0.65 + ((raw - 0.6) / 0.15) * 0.25
+        break
+      case 'relations':
+        // Crudo 0,75..0,90 -> 0,90..1
+        overall = 0.9 + ((raw - 0.75) / 0.15) * 0.1
+        break
+      default:
+        // "conversion" solo marca el principio y el final.
+        overall = raw >= 1 ? 1 : last
+    }
+
+    // Blindaje: si el conversor cambia sus tramos, la barra nunca retrocede.
+    last = Math.min(1, Math.max(last, overall))
+    return last
+  }
+}
 
 /**
  * Obliga a web-ifc a usar su compilacion de un solo hilo.
@@ -156,14 +208,28 @@ self.onmessage = async (event: MessageEvent<ConvertRequest>) => {
     // cache es notablemente mas rapido, que es justamente para lo que existe.
     const raw = true
 
+    const mapProgress = makeProgressMapper()
+    let entities = 0
     let lastSent = 0
+
     const progressCallback = (progress: number, info: ProgressData) => {
+      entities += info.entitiesProcessed ?? 0
+      const overall = mapProgress(progress, info.process)
+
       // Limitar la frecuencia: sin esto la conversion emite miles de mensajes
-      // por segundo y la UI se atasca redibujando la barra.
+      // por segundo y la UI se atasca redibujando la barra. El ultimo aviso
+      // siempre pasa, para que la barra no se quede corta al terminar.
       const now = performance.now()
-      if (now - lastSent < 100 && progress < 1) return
+      if (now - lastSent < 150 && overall < 1) return
       lastSent = now
-      post({ type: 'progress', progress, stage: info.process })
+
+      post({
+        type: 'progress',
+        progress: overall,
+        stage: info.process,
+        ifcClass: info.class,
+        entities,
+      })
     }
 
     const fragments = req.ctrl && req.data

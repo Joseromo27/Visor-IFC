@@ -23,6 +23,16 @@ const formatSize = (bytes: number) =>
 const formatElapsed = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
 
+/** Duracion legible para esperas largas: "3 min 12 s". */
+const formatDuration = (ms: number) => {
+  const total = Math.max(0, Math.round(ms / 1000))
+  const min = Math.floor(total / 60)
+  const sec = total % 60
+  return min > 0 ? `${min} min ${sec} s` : `${sec} s`
+}
+
+const formatCount = (n: number) => n.toLocaleString('es-CL')
+
 interface ModelMeta {
   name: string
   size: number
@@ -340,7 +350,18 @@ export default function App() {
           {busy && progress && (
             <div className="overlay">
               <div className="overlay-card">
-                <h4>{STAGE_LABELS[progress.stage] ?? 'Procesando'}</h4>
+                <div className="overlay-head">
+                  <h4>{STAGE_LABELS[progress.stage] ?? 'Procesando'}</h4>
+                  {progress.ifcClass && (
+                    <span className="overlay-class">{progress.ifcClass}</span>
+                  )}
+                  {progress.progress !== null && (
+                    <strong className="overlay-pct">
+                      {Math.round(progress.progress * 100)}%
+                    </strong>
+                  )}
+                </div>
+
                 <div className="bar">
                   <div
                     className={`bar-fill${
@@ -353,11 +374,43 @@ export default function App() {
                     }
                   />
                 </div>
-                <p className="overlay-note">
-                  {progress.progress !== null
-                    ? `${Math.round(progress.progress * 100)}%`
-                    : 'Esto puede tardar varios minutos en modelos grandes.'}
-                </p>
+
+                <dl className="overlay-stats">
+                  {progress.totalBytes !== undefined &&
+                    progress.bytesRead !== undefined && (
+                      <div>
+                        <dt>Leido</dt>
+                        <dd>
+                          {formatSize(progress.bytesRead)} de{' '}
+                          {formatSize(progress.totalBytes)}
+                        </dd>
+                      </div>
+                    )}
+                  {progress.entities !== undefined && progress.entities > 0 && (
+                    <div>
+                      <dt>Entidades</dt>
+                      <dd>{formatCount(progress.entities)}</dd>
+                    </div>
+                  )}
+                  {progress.elapsedMs !== undefined && (
+                    <div>
+                      <dt>Transcurrido</dt>
+                      <dd>{formatDuration(progress.elapsedMs)}</dd>
+                    </div>
+                  )}
+                  {progress.etaMs != null && (
+                    <div>
+                      <dt>Restante aprox.</dt>
+                      <dd>{formatDuration(progress.etaMs)}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                {progress.progress === null && (
+                  <p className="overlay-note">
+                    Esto puede tardar varios minutos en modelos grandes.
+                  </p>
+                )}
               </div>
             </div>
           )}

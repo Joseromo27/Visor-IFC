@@ -452,3 +452,64 @@ body {
   color: var(--text-dim);
   font-size: 10px;
 }
+
+/* --- Detalle del progreso ------------------------------------------------- */
+
+.overlay-card {
+  width: min(460px, 84%);
+}
+
+.overlay-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.overlay-head h4 {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.overlay-class {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.overlay-pct {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+
+.overlay-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin: 14px 0 0;
+}
+
+.overlay-stats > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 3px;
+}
+
+.overlay-stats dt {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.overlay-stats dd {
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

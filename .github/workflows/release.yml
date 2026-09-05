@@ -86,9 +86,21 @@ jobs:
             fallo=1
           else
             echo "TAURI_SIGNING_PRIVATE_KEY presente: ${#KEY} caracteres"
-            case "$KEY" in
-              *"untrusted comment:"*) echo "  formato minisign reconocido" ;;
-              *) echo "::warning::No parece una clave minisign de Tauri" ;;
+            # La clave que genera Tauri es una sola linea en base64; el texto
+            # "untrusted comment" solo aparece al decodificarla, asi que
+            # buscarlo en crudo da un falso negativo. Se valida la forma.
+            limpia="$(printf '%s' "$KEY" | tr -d '[:space:]')"
+            case "$limpia" in
+              *[!A-Za-z0-9+/=]*)
+                echo "::error::La clave no es base64: contiene caracteres que no corresponden. Copia el archivo visor-ifc.key completo."
+                fallo=1 ;;
+              *)
+                if [ "${#limpia}" -lt 100 ]; then
+                  echo "::error::La clave parece truncada (${#limpia} caracteres). Se esperan varios cientos."
+                  fallo=1
+                else
+                  echo "  forma correcta: base64 de ${#limpia} caracteres"
+                fi ;;
             esac
           fi
 

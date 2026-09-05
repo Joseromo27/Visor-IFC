@@ -134,9 +134,48 @@ export class Viewer {
       camera: this.world.camera.three,
     })
 
+    this.adjustCameraPlanes()
     await this.fragments.core.update(true)
     await this.fitToModel()
     return this.model
+  }
+
+  /**
+   * Ajusta los planos de recorte al tamano real del modelo.
+   *
+   * Las camaras de @thatopen/components nacen con `far = 1000`, pensado para
+   * edificios. Un modelo de obra lineal mide kilometros: al encuadrarlo entero
+   * la camara queda a mas de 10 km y todo lo que pasa de 1000 m desaparece, asi
+   * que el visor muestra dos hilos sueltos en vez del corredor completo.
+   *
+   * `near` se escala tambien, pero se mantiene pequeno para poder acercarse a
+   * un elemento concreto sin que se recorte; la razon far/near queda en torno a
+   * 1e5, dentro de lo que el buffer de profundidad tolera sin z-fighting
+   * apreciable.
+   */
+  private adjustCameraPlanes() {
+    if (!this.model) return
+    const box = this.model.box
+    if (box.isEmpty()) return
+
+    const diagonal = box.getSize(new THREE.Vector3()).length()
+    const far = Math.max(1000, diagonal * 5)
+    const near = Math.min(1, Math.max(0.05, diagonal / 50000))
+
+    for (const camera of [
+      this.world.camera.threePersp,
+      this.world.camera.threeOrtho,
+    ]) {
+      camera.near = near
+      camera.far = far
+      camera.updateProjectionMatrix()
+    }
+  }
+
+  /** Planos de recorte vigentes. Para diagnostico. */
+  getCameraPlanes() {
+    const c = this.world.camera.three
+    return { near: c.near, far: c.far }
   }
 
   async disposeModel() {
@@ -180,10 +219,32 @@ export class Viewer {
     return names
   }
 
+  /** Diagnostico del encuadre: dimensiones y centro del modelo. */
+  getBoxInfo(): { size: THREE.Vector3; center: THREE.Vector3 } | null {
+    if (!this.model) return null
+    const box = this.model.box
+    if (box.isEmpty()) return null
+    return {
+      size: box.getSize(new THREE.Vector3()),
+      center: box.getCenter(new THREE.Vector3()),
+    }
+  }
+
+  /** Cajas individuales, para detectar elementos disparados lejos del resto. */
+  async getItemBoxes(localIds: number[]) {
+    if (!this.model) return []
+    return this.model.getBoxes(localIds)
+  }
+
+  /** Ids de los elementos que tienen geometria. */
+  async getIdsWithGeometry(): Promise<number[]> {
+    if (!this.model) return []
+    return this.model.getItemsIdsWithGeometry()
+  }
+
   /** Cantidad de elementos con geometria. Util para contrastar contra el arbol. */
   async getItemsWithGeometryCount(): Promise<number> {
-    if (!this.model) return 0
-    return (await this.model.getItemsIdsWithGeometry()).length
+    return (await this.getIdsWithGeometry()).length
   }
 
   async getCategories(): Promise<string[]> {

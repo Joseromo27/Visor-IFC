@@ -4,10 +4,19 @@ Visor de modelos IFC de escritorio. Abre archivos grandes, los convierte a
 Fragments y los muestra en 3D con arbol jerarquico y consulta de propiedades.
 
 Soporta IFC4 e **IFC4X3** (obra lineal). Esto ultimo no sale gratis: el
-conversor de `@thatopen/fragments` viene configurado para edificacion y hay que
-anadirle los contenedores espaciales de infraestructura, o el arbol de un modelo
-de carretera se queda en el sitio y no muestra ni un elemento. Ver
-`CLASES_ESPACIALES_IFC4X3` en `src/workers/ifcConverter.worker.ts`.
+ecosistema That Open asume edificacion por defecto y hay dos cosas que corregir
+para que un modelo de kilometros se comporte.
+
+- El conversor solo serializa las clases que conoce, y su lista no incluye los
+  contenedores espaciales de infraestructura. Sin `IfcFacility`, el arbol de un
+  modelo de carretera se queda en el sitio y no muestra ni un elemento aunque
+  el modelo tenga miles. Ver `CLASES_ESPACIALES_IFC4X3` en
+  `src/workers/ifcConverter.worker.ts`.
+- Las camaras nacen con `far = 1000` metros. Un corredor vial mide kilometros:
+  al encuadrarlo entero la camara queda a mas de 10 km y **todo lo que pasa de
+  1000 m se recorta**, con lo que el visor muestra dos hilos sueltos en vez del
+  modelo. `Viewer.adjustCameraPlanes` recalcula `near` y `far` a partir de la
+  caja del modelo cada vez que se carga uno.
 
 Tauri 2 (Rust + WebView del sistema) con un frontend React + Vite + TypeScript
 sobre `@thatopen/components`, `@thatopen/fragments`, `web-ifc` y Three.js.

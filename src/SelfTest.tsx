@@ -8,6 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { exit } from '@tauri-apps/plugin-process'
+import * as THREE from 'three'
 
 import { loadIfc } from './lib/conversion'
 import { buildDisplayTree, collectIds, countNodes } from './lib/tree'
@@ -122,6 +123,46 @@ export default function SelfTest({ path }: { path: string }) {
                 .join('')
         say(`esquema:\n${roots.map((r) => esquema(r, 0)).join('')}`)
 
+        // --- Encuadre ---
+        const box = viewer.getBoxInfo()
+        if (box) {
+          const f = (n: number) => n.toFixed(1)
+          say(
+            `caja del modelo: ${f(box.size.x)} x ${f(box.size.y)} x ${f(box.size.z)} m` +
+              ` | centro (${f(box.center.x)}, ${f(box.center.y)}, ${f(box.center.z)})`,
+          )
+          const idsGeom = await viewer.getIdsWithGeometry()
+          const cajas = await viewer.getItemBoxes(idsGeom.slice(0, 400))
+          const diagonales = cajas
+            .filter((c) => !c.isEmpty())
+            .map((c) => c.getSize(new THREE.Vector3()).length())
+            .sort((a, b) => a - b)
+          if (diagonales.length > 0) {
+            const mediana = diagonales[Math.floor(diagonales.length / 2)]
+            say(
+              `tamano de elementos (m): min ${f(diagonales[0])}` +
+                ` | mediana ${f(mediana)}` +
+                ` | max ${f(diagonales[diagonales.length - 1])}`,
+            )
+            // Si la caja global es ordenes de magnitud mayor que los elementos,
+            // encuadrar el modelo entero deja todo reducido a pelos.
+            const razon = box.size.length() / Math.max(mediana, 0.001)
+            say(
+              `la diagonal del modelo es ${Math.round(razon)}x la del elemento mediano`,
+            )
+          }
+
+          // Con far = 1000 (el valor por defecto de la libreria) un modelo de
+          // kilometros se recorta casi entero al encuadrarlo.
+          const planos = viewer.getCameraPlanes()
+          const diagonal = box.size.length()
+          check(
+            planos.far >= diagonal,
+            'el plano lejano cubre el modelo completo',
+            `far=${planos.far.toFixed(0)} m, near=${planos.near.toFixed(2)} m, diagonal=${diagonal.toFixed(0)} m`,
+          )
+        }
+
         // --- Nombres para el arbol ---
         const nombres = await viewer.getNames(ids.slice(0, 60))
         check(
@@ -152,6 +193,17 @@ export default function SelfTest({ path }: { path: string }) {
         say('OK   mostrar todo')
         await viewer.fitToModel()
         say('OK   vista completa')
+
+        // Encuadrar un elemento concreto: en un modelo de kilometros es la
+        // unica forma de ver algo con detalle, y ejercita el renderizado de
+        // cerca, que depende del plano `near`.
+        const conGeom = await viewer.getIdsWithGeometry()
+        if (conGeom.length > 0) {
+          const foco = conGeom.slice(0, 3)
+          await viewer.fitToItems(foco)
+          await viewer.highlight(foco[0])
+          check(true, 'enfocar elementos concretos', `ids ${foco.join(', ')}`)
+        }
 
         // --- Segunda pasada: debe venir del cache ---
         const t1 = performance.now()

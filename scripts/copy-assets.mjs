@@ -9,10 +9,13 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const assets = [
+  // Solo la compilacion de un solo hilo: el worker de conversion fuerza ese
+  // modo a proposito (ver src/workers/ifcConverter.worker.ts), asi que
+  // web-ifc-mt.wasm nunca se pide y solo sumaria peso al ejecutable.
   ['node_modules/web-ifc/web-ifc.wasm', 'public/wasm/web-ifc.wasm'],
-  ['node_modules/web-ifc/web-ifc-mt.wasm', 'public/wasm/web-ifc-mt.wasm'],
+  // Version minificada: todo dist/ acaba incrustado en el binario de Tauri.
   [
-    'node_modules/@thatopen/fragments/dist/Worker/worker.mjs',
+    'node_modules/@thatopen/fragments/dist/Worker/worker.min.mjs',
     'public/fragments-worker.mjs',
   ],
 ]

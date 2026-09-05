@@ -134,6 +134,38 @@ function makeChunkServer(
   }
 }
 
+/**
+ * Lee el archivo completo en memoria, en trozos.
+ *
+ * Usa el mismo comando nativo que el puente y no el plugin de filesystem: los
+ * permisos de la aplicacion solo abren la carpeta de datos, mientras que el IFC
+ * puede estar en cualquier parte del disco.
+ */
+async function readWholeFile(
+  path: string,
+  onProgress: (p: LoadProgress) => void,
+): Promise<Uint8Array> {
+  const { size } = await getFileInfo(path)
+  const bytes = new Uint8Array(size)
+  const CHUNK = 16 * 1024 * 1024
+  let offset = 0
+
+  while (offset < size) {
+    const chunk = await invoke<ArrayBuffer>('read_chunk', {
+      path,
+      offset,
+      len: Math.min(CHUNK, size - offset),
+    })
+    const view = new Uint8Array(chunk)
+    if (view.byteLength === 0) break
+    bytes.set(view, offset)
+    offset += view.byteLength
+    onProgress({ stage: 'lectura', progress: offset / size })
+  }
+
+  return bytes
+}
+
 /** Convierte el IFC a Fragments en un worker, informando el avance. */
 function convertInWorker(
   path: string,
@@ -193,8 +225,7 @@ function convertInWorker(
     console.warn(
       'Sin crossOriginIsolated: se leera el IFC completo en memoria en vez de por trozos.',
     )
-    onProgress({ stage: 'lectura', progress: null })
-    readFile(path)
+    readWholeFile(path, onProgress)
       .then((bytes) => {
         const req: ConvertRequest = { type: 'convert', path, bytes }
         worker.postMessage(req, [bytes.buffer as ArrayBuffer])

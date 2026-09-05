@@ -39,8 +39,12 @@ export default defineConfig({
   build: {
     // El WebView de Tauri en Windows es Chromium moderno
     target: 'esnext',
-    minify: !process.env.TAURI_ENV_DEBUG,
-    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // Siempre minificado y sin sourcemaps, incluso en builds de depuracion:
+    // Tauri incrusta todo dist/ dentro del ejecutable, y los mapas de
+    // three.js y fragments lo llevaban de 18 MB a mas de 60 MB, con el
+    // consiguiente castigo en el tiempo de compilacion de Rust.
+    minify: true,
+    sourcemap: false,
     chunkSizeWarningLimit: 4000,
   },
 })

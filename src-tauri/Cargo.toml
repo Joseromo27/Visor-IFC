@@ -41,5 +41,7 @@ opt-level = 3
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
 strip = true
+# Sin `panic = "abort"`: recorta algo el binario, pero rompe el desenrollado de
+# pila que atraviesa los limites FFI de wry y WebView2, y el ahorro no compensa
+# arriesgar cierres abruptos en el equipo de otra persona.

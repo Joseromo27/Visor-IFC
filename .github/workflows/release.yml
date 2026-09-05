@@ -69,6 +69,42 @@ jobs:
 
       - run: npm ci
 
+      # Con createUpdaterArtifacts activo, una clave de firma ausente o mal
+      # copiada hace fallar el build entero, y el error que sale no dice que el
+      # problema sean los secretos. Esto lo deja claro de entrada, sin revelar
+      # los valores: solo longitud y si arrastran espacios o saltos de linea,
+      # que es como se cuelan al copiarlos con la terminal.
+      - name: Verificar secretos de firma
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PASS: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          fallo=0
+          if [ -z "$KEY" ]; then
+            echo "::error::Falta el secreto TAURI_SIGNING_PRIVATE_KEY"
+            fallo=1
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY presente: ${#KEY} caracteres"
+            case "$KEY" in
+              *"untrusted comment:"*) echo "  formato minisign reconocido" ;;
+              *) echo "::warning::No parece una clave minisign de Tauri" ;;
+            esac
+          fi
+
+          if [ -z "$PASS" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY_PASSWORD vacio (correcto solo si la clave no tiene contrasena)"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD presente: ${#PASS} caracteres"
+            recortado="$(printf '%s' "$PASS" | tr -d '[:space:]')"
+            if [ "${#recortado}" -ne "${#PASS}" ]; then
+              echo "::error::La contrasena arrastra espacios o saltos de linea (${#PASS} caracteres frente a ${#recortado} sin espacios). Vuelve a copiarla sin el salto final."
+              fallo=1
+            fi
+          fi
+
+          exit $fallo
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

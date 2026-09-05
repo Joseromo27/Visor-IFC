@@ -85,7 +85,7 @@ jobs:
             echo "::error::Falta el secreto TAURI_SIGNING_PRIVATE_KEY"
             fallo=1
           else
-            echo "TAURI_SIGNING_PRIVATE_KEY presente: ${#KEY} caracteres"
+            echo "::notice::TAURI_SIGNING_PRIVATE_KEY: ${#KEY} caracteres"
             # La clave que genera Tauri es una sola linea en base64; el texto
             # "untrusted comment" solo aparece al decodificarla, asi que
             # buscarlo en crudo da un falso negativo. Se valida la forma.
@@ -99,7 +99,7 @@ jobs:
                   echo "::error::La clave parece truncada (${#limpia} caracteres). Se esperan varios cientos."
                   fallo=1
                 else
-                  echo "  forma correcta: base64 de ${#limpia} caracteres"
+                  echo "::notice::La clave tiene forma correcta: base64 de ${#limpia} caracteres"
                 fi ;;
             esac
           fi
@@ -107,7 +107,7 @@ jobs:
           if [ -z "$PASS" ]; then
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY_PASSWORD vacio (correcto solo si la clave no tiene contrasena)"
           else
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD presente: ${#PASS} caracteres"
+            echo "::notice::TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${#PASS} caracteres"
             recortado="$(printf '%s' "$PASS" | tr -d '[:space:]')"
             if [ "${#recortado}" -ne "${#PASS}" ]; then
               echo "::error::La contrasena arrastra espacios o saltos de linea (${#PASS} caracteres frente a ${#recortado} sin espacios). Vuelve a copiarla sin el salto final."

@@ -117,9 +117,17 @@ export class Viewer {
   async loadModel(fragments: Uint8Array) {
     await this.disposeModel()
 
-    // `slice()` entrega un ArrayBuffer propio: el Uint8Array puede venir de un
-    // buffer transferido desde el worker y fragments se queda con la memoria.
-    const buffer = fragments.slice().buffer
+    // fragments se queda con el ArrayBuffer, asi que tiene que ser uno propio y
+    // completo. El que llega del worker ya lo es (viene transferido, no
+    // copiado), y copiarlo igualmente duplicaria mas de 100 MB en un modelo
+    // grande; solo se copia si resulta ser una vista parcial de otro buffer.
+    const esBufferCompleto =
+      fragments.byteOffset === 0 &&
+      fragments.byteLength === fragments.buffer.byteLength
+
+    const buffer = esBufferCompleto
+      ? (fragments.buffer as ArrayBuffer)
+      : (fragments.slice().buffer as ArrayBuffer)
 
     this.model = await this.fragments.core.load(buffer, {
       modelId: MODEL_ID,

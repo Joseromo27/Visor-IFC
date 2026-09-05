@@ -38,25 +38,41 @@ produccion. Si no estuviera disponible, la aplicacion recurre a leer el archivo
 completo: sirve para modelos chicos, pero con ~1 GB es probable que agote la
 memoria.
 
-## Pendiente: el archivo de ~1 GB
+## Rendimiento medido
 
-El flujo esta verificado con un modelo de 32 MB. Para el objetivo de ~1 GB
-quedan dos limites por medir, ninguno de los cuales resuelve el puente de
-lectura por trozos:
+Medido en un i7-11800H con 15,6 GB de RAM, sobre un IFC4X3 de **741,6 MB** de
+obra lineal (855 elementos con geometria, mallas muy densas).
 
-- **web-ifc corre en WebAssembly de 32 bits**, con un techo de 4 GB de espacio
-  de direcciones para todo el proceso de parseo. Los ajustes que importan son
-  `MEMORY_LIMIT` (2 GB por defecto) y `TAPE_SIZE` (64 MB), que se pasan con
-  `importer.webIfcSettings` en `src/workers/ifcConverter.worker.ts`. Es el
-  primer sitio donde tocar si la conversion se queda sin memoria.
-- **El resultado en Fragments se materializa entero** en memoria al terminar la
-  conversion, y se transfiere al hilo principal sin copiarlo. Con la proporcion
-  observada (32 MB de IFC producen 5 MB de Fragments) rondaria los 160 MB, que
-  es asumible; conviene confirmarlo antes de dar el caso por cerrado.
+| Escenario | Tiempo | Pico de memoria del WebView |
+| --- | --- | --- |
+| Primera apertura, con conversion | 54 s | ~4,5 GB |
+| Aperturas siguientes, desde cache | 1,0 s | ~1,1 GB |
+
+Los Fragments resultantes ocupan 103,6 MB en disco.
+
+Lo que hay que saber de esas cifras:
+
+- **El pico de 4,5 GB es transitorio y se paga una sola vez por archivo.** A
+  partir de la segunda apertura el modelo entra desde el cache y el consumo se
+  queda en torno a 1,1 GB, que es el coste real del uso diario.
+- **Para convertir hace falta holgura de RAM.** Con 8 GB totales la conversion
+  probablemente termine, pero paginando; con 4 GB no. Ver un modelo ya
+  convertido, en cambio, va comodo en cualquier equipo moderno.
+- Un equipo puede saltarse la conversion copiando el `.frag` ya generado a
+  `%LOCALAPPDATA%\cl.len.visorifc\cache-fragments` de otra maquina, siempre que
+  el IFC este en la misma ruta y con la misma fecha de modificacion: la clave
+  de cache se calcula con esos datos.
+
+Se probo bajar `MEMORY_LIMIT` de web-ifc de 2 GB a 1 GB: el pico solo baja de
+~4,75 GB a ~4,58 GB, un 3-4 %. **El pico es inherente a la conversion, no a ese
+ajuste**, asi que se dejo el valor por defecto en vez de fijar una constante
+interna de la libreria. Si hiciera falta apretar mas, los knobs son
+`MEMORY_LIMIT`, `TAPE_SIZE` y `CIRCLE_SEGMENTS` (este ultimo reduce la
+teselacion de superficies curvas, con perdida de calidad visual), todos vía
+`importer.webIfcSettings` en `src/workers/ifcConverter.worker.ts`.
 
 Con `raw: true` el `.frag` no va comprimido: pesa mas en disco pero abre mucho
-mas rapido, que es justamente para lo que existe el cache. Si el tamano llegara
-a ser un problema con modelos grandes, ese es el interruptor.
+mas rapido, que es justamente para lo que existe el cache.
 
 ## Requisitos de desarrollo
 

@@ -38,6 +38,26 @@ produccion. Si no estuviera disponible, la aplicacion recurre a leer el archivo
 completo: sirve para modelos chicos, pero con ~1 GB es probable que agote la
 memoria.
 
+## Pendiente: el archivo de ~1 GB
+
+El flujo esta verificado con un modelo de 32 MB. Para el objetivo de ~1 GB
+quedan dos limites por medir, ninguno de los cuales resuelve el puente de
+lectura por trozos:
+
+- **web-ifc corre en WebAssembly de 32 bits**, con un techo de 4 GB de espacio
+  de direcciones para todo el proceso de parseo. Los ajustes que importan son
+  `MEMORY_LIMIT` (2 GB por defecto) y `TAPE_SIZE` (64 MB), que se pasan con
+  `importer.webIfcSettings` en `src/workers/ifcConverter.worker.ts`. Es el
+  primer sitio donde tocar si la conversion se queda sin memoria.
+- **El resultado en Fragments se materializa entero** en memoria al terminar la
+  conversion, y se transfiere al hilo principal sin copiarlo. Con la proporcion
+  observada (32 MB de IFC producen 5 MB de Fragments) rondaria los 160 MB, que
+  es asumible; conviene confirmarlo antes de dar el caso por cerrado.
+
+Con `raw: true` el `.frag` no va comprimido: pesa mas en disco pero abre mucho
+mas rapido, que es justamente para lo que existe el cache. Si el tamano llegara
+a ser un problema con modelos grandes, ese es el interruptor.
+
 ## Requisitos de desarrollo
 
 - Node.js 20 o superior

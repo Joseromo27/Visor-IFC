@@ -36,6 +36,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::file_info,
             commands::cache_path,
+            commands::cache_has,
+            commands::cache_read,
             commands::read_chunk,
         ])
         .run(tauri::generate_context!())

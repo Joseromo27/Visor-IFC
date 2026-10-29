@@ -59,8 +59,19 @@ function Rows({ data }: { data: ItemData }) {
   )
 }
 
-function Group({ title, entries }: { title: string; entries: ItemData[] }) {
-  const [open, setOpen] = useState(true)
+function Group({
+  title,
+  entries,
+  depth = 0,
+}: {
+  title: string
+  entries: ItemData[]
+  depth?: number
+}) {
+  // Solo el primer nivel nace abierto. Los property sets de un elemento
+  // cualquiera anidan varios niveles, y pintarlos todos de golpe deja la
+  // interfaz sin responder un buen rato; asi se pinta lo que se mira.
+  const [open, setOpen] = useState(depth === 0)
 
   return (
     <section className="props-group">
@@ -81,7 +92,12 @@ function Group({ title, entries }: { title: string; entries: ItemData[] }) {
             {Object.entries(entry)
               .filter(([, v]) => isGroup(v))
               .map(([key, v]) => (
-                <Group key={key} title={key} entries={v as ItemData[]} />
+                <Group
+                  key={key}
+                  title={key}
+                  entries={v as ItemData[]}
+                  depth={depth + 1}
+                />
               ))}
           </div>
         ))}

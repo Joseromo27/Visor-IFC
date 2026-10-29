@@ -3,7 +3,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { exists, readFile, writeFile } from '@tauri-apps/plugin-fs'
+import { writeFile } from '@tauri-apps/plugin-fs'
 import type { ProgressData } from '@thatopen/fragments'
 
 import {
@@ -100,9 +100,18 @@ async function cacheKey(path: string, info: FileInfo): Promise<string> {
     .join('')
 }
 
-async function cachePathFor(path: string, info: FileInfo): Promise<string> {
-  const key = await cacheKey(path, info)
-  return invoke<string>('cache_path', { key })
+/**
+ * Lectura del cache por el lado nativo.
+ *
+ * El plugin de filesystem no sirve aqui: su control de alcance acepta estas
+ * rutas mientras el archivo no existe y las rechaza con "forbidden path" en
+ * cuanto se crea, asi que reabrir un modelo ya convertido fallaba. El comando
+ * propio construye la ruta y la valida, sin globs de por medio.
+ */
+async function leerCache(key: string): Promise<Uint8Array | null> {
+  if (!(await invoke<boolean>('cache_has', { key }))) return null
+  const buf = await invoke<ArrayBuffer>('cache_read', { key })
+  return buf.byteLength > 0 ? new Uint8Array(buf) : null
 }
 
 /**
@@ -338,13 +347,13 @@ export async function loadIfc(
 ): Promise<LoadResult> {
   const started = performance.now()
   const info = await getFileInfo(path)
-  const cached = await cachePathFor(path, info)
+  const key = await cacheKey(path, info)
 
-  if (await exists(cached)) {
+  const cacheado = await leerCache(key)
+  if (cacheado) {
     onProgress({ stage: 'cache', progress: null })
-    const fragments = await readFile(cached)
     return {
-      fragments,
+      fragments: cacheado,
       info,
       fromCache: true,
       elapsedMs: performance.now() - started,
@@ -360,7 +369,8 @@ export async function loadIfc(
   // Guardar el resultado no debe hacer fallar la carga: si el disco esta lleno
   // o la carpeta no es escribible, el modelo ya esta listo para mostrarse.
   try {
-    await writeFile(cached, fragments)
+    const destino = await invoke<string>('cache_path', { key })
+    await writeFile(destino, fragments)
   } catch (err) {
     console.error('No se pudo guardar el cache de Fragments', err)
   }

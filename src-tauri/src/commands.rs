@@ -52,13 +52,20 @@ pub fn file_info(path: String) -> Result<FileInfo, String> {
     })
 }
 
-/// Ruta del archivo de cache para una clave dada, creando la carpeta si hace
-/// falta. La union de rutas se hace aqui y no en el frontend para no tener que
-/// codificar el separador de cada sistema operativo en TypeScript.
+/// Ruta del archivo de cache para una clave dada. La necesita el frontend
+/// para escribir el resultado de la conversion.
 #[tauri::command]
 pub fn cache_path(app: tauri::AppHandle, key: String) -> Result<String, String> {
-    // La clave viene de un hash hexadecimal, pero se valida igual: es lo unico
-    // que separa esta ruta de un salto fuera de la carpeta de cache.
+    Ok(ruta_cache(&app, &key)?.to_string_lossy().into_owned())
+}
+
+/// Ruta del archivo de cache, con la carpeta ya creada.
+///
+/// La union de rutas se hace aqui y no en el frontend para no codificar el
+/// separador de cada sistema operativo en TypeScript. La clave viene de un
+/// hash hexadecimal, pero se valida igual: es lo unico que separa esta ruta de
+/// un salto fuera de la carpeta de cache.
+fn ruta_cache(app: &tauri::AppHandle, key: &str) -> Result<PathBuf, String> {
     if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("Clave de cache invalida: '{key}'"));
     }
@@ -72,7 +79,31 @@ pub fn cache_path(app: tauri::AppHandle, key: String) -> Result<String, String> 
     fs::create_dir_all(&dir)
         .map_err(|e| format!("No se pudo crear '{}': {e}", dir.display()))?;
 
-    Ok(dir.join(format!("{key}.frag")).to_string_lossy().into_owned())
+    Ok(dir.join(format!("{key}.frag")))
+}
+
+/// Indica si hay Fragments cacheados para esa clave.
+///
+/// Lo resuelve el lado nativo y no el plugin de filesystem porque el alcance
+/// del plugin rechaza estas mismas rutas en cuanto el archivo existe: la
+/// comprobacion devuelve `false` sin problema mientras no hay nada, y falla
+/// con "forbidden path" justo despues de crearlo, de modo que reabrir un
+/// modelo ya convertido reventaba.
+#[tauri::command]
+pub fn cache_has(app: tauri::AppHandle, key: String) -> Result<bool, String> {
+    Ok(ruta_cache(&app, &key)?.is_file())
+}
+
+/// Lee los Fragments cacheados. Devuelve un buffer vacio si no hay nada.
+#[tauri::command]
+pub fn cache_read(app: tauri::AppHandle, key: String) -> Result<Response, String> {
+    let ruta = ruta_cache(&app, &key)?;
+    if !ruta.is_file() {
+        return Ok(Response::new(Vec::new()));
+    }
+    let datos = fs::read(&ruta)
+        .map_err(|e| format!("No se pudo leer el cache '{}': {e}", ruta.display()))?;
+    Ok(Response::new(datos))
 }
 
 /// Lee `len` bytes desde `offset`. Devuelve menos bytes al llegar al final del

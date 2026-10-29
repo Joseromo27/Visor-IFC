@@ -5,6 +5,8 @@ import * as OBC from '@thatopen/components'
 import * as FRAGS from '@thatopen/fragments'
 import * as THREE from 'three'
 
+import { podarItemData } from '../lib/itemData'
+
 /** Worker de fragments copiado a public/ en postinstall. Se usa el archivo
  *  local en vez de `FragmentsManager.getWorker()`, que lo descarga de unpkg:
  *  la aplicacion tiene que funcionar sin conexion. */
@@ -31,6 +33,8 @@ export class Viewer {
   private fragments!: OBC.FragmentsManager
   private model: FRAGS.FragmentsModel | null = null
   private container: HTMLElement | null = null
+  /** Ids con geometria del modelo cargado, para filtrar encuadres. */
+  private idsConGeometria = new Set<number>()
 
   /** Se dispara al hacer clic en el modelo. `null` al hacer clic en vacio. */
   onSelect: ((localId: number | null) => void) | null = null
@@ -134,6 +138,7 @@ export class Viewer {
       camera: this.world.camera.three,
     })
 
+    this.idsConGeometria = new Set(await this.model.getItemsIdsWithGeometry())
     this.adjustCameraPlanes()
     await this.fragments.core.update(true)
     await this.fitToModel()
@@ -172,6 +177,28 @@ export class Viewer {
     }
   }
 
+  /**
+   * Fuerza la reevaluacion de que geometria sube a la GPU. Es lo que dispara
+   * el evento `rest` de la camara al terminar un encuadre, pero alli va sin
+   * esperar: si tarda, la ventana se queda sin responder y no hay forma de
+   * atribuirlo. Expuesto para poder medirlo.
+   */
+  async forceUpdate() {
+    await this.fragments.core.update(true)
+  }
+
+  /** Posicion y distancia al objetivo de la camara. Para diagnostico. */
+  getCameraState() {
+    const c = this.world.camera.three
+    const controls = this.world.camera.controls
+    const objetivo = controls.getTarget(new THREE.Vector3())
+    return {
+      posicion: c.position.clone(),
+      objetivo,
+      distancia: c.position.distanceTo(objetivo),
+    }
+  }
+
   /** Planos de recorte vigentes. Para diagnostico. */
   getCameraPlanes() {
     const c = this.world.camera.three
@@ -182,6 +209,7 @@ export class Viewer {
     if (!this.model) return
     await this.fragments.core.disposeModel(MODEL_ID)
     this.model = null
+    this.idsConGeometria.clear()
   }
 
   /** Arbol espacial del modelo: proyecto > sitio > edificio > piso > elementos. */
@@ -247,12 +275,28 @@ export class Viewer {
     return (await this.getIdsWithGeometry()).length
   }
 
-  async getCategories(): Promise<string[]> {
-    if (!this.model) return []
-    return this.model.getCategories()
+  /** Datos sin podar. Solo para diagnostico: pintarlos cuelga la interfaz. */
+  async getItemDataSinPodar(localId: number): Promise<FRAGS.ItemData | null> {
+    if (!this.model) return null
+    const [d] = await this.model.getItemsData([localId], {
+      attributesDefault: true,
+      relations: {
+        IsDefinedBy: { attributes: true, relations: true },
+        DefinesOcurrence: { attributes: false, relations: false },
+      },
+      relationsDefault: { attributes: false, relations: false },
+    })
+    return d ?? null
   }
 
-  /** Property sets y atributos de un elemento. */
+  /**
+   * Property sets y atributos de un elemento, ya acotados.
+   *
+   * Las relaciones hay que pedirlas en profundidad porque los valores de las
+   * propiedades cuelgan por debajo de ellas, pero lo que vuelve es ciclico.
+   * Se poda aqui y no en el panel para que ningun consumidor pueda recibir una
+   * estructura sin fin.
+   */
   async getItemData(localId: number): Promise<FRAGS.ItemData | null> {
     if (!this.model) return null
     const [data] = await this.model.getItemsData([localId], {
@@ -263,7 +307,19 @@ export class Viewer {
       },
       relationsDefault: { attributes: false, relations: false },
     })
-    return data ?? null
+    if (!data) return null
+
+    const { data: podado, info } = podarItemData(data)
+    // Cortar el ciclo es lo normal y pasa en todos los elementos, asi que no
+    // se reporta. Los cortes por profundidad o presupuesto si: significan que
+    // puede haberse quedado fuera informacion real y conviene saberlo.
+    if (info.porProfundidad > 0 || info.porPresupuesto > 0) {
+      console.warn(
+        `propiedades de #${localId} truncadas: ${info.nodos} nodos conservados,` +
+          ` ${info.porProfundidad} cortes por profundidad y ${info.porPresupuesto} por presupuesto`,
+      )
+    }
+    return podado
   }
 
   async highlight(localId: number | null) {
@@ -308,10 +364,21 @@ export class Viewer {
     })
   }
 
-  /** Encuadra la camara sobre un conjunto de elementos. */
+  /**
+   * Encuadra la camara sobre un conjunto de elementos.
+   *
+   * Se filtran los que no tienen geometria antes de pedir la caja: los nodos
+   * espaciales del arbol (proyecto, sitio, instalacion) no tienen caja propia,
+   * y basta con que se cuele uno para que la caja combinada salga vacia y el
+   * boton no haga nada sin decir por que.
+   */
   async fitToItems(localIds: number[]) {
     if (!this.model || localIds.length === 0) return
-    const box = await this.model.getMergedBox(localIds)
+
+    const conGeometria = localIds.filter((id) => this.idsConGeometria.has(id))
+    if (conGeometria.length === 0) return
+
+    const box = await this.model.getMergedBox(conGeometria)
     if (box.isEmpty()) return
     await this.world.camera.controls.fitToBox(box, true, {
       paddingLeft: 1,

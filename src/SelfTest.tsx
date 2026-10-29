@@ -10,6 +10,9 @@ import { useEffect, useRef, useState } from 'react'
 import { exit } from '@tauri-apps/plugin-process'
 import * as THREE from 'three'
 
+import type { ItemData } from '@thatopen/fragments'
+
+import { PropertiesPanel } from './components/PropertiesPanel'
 import { loadIfc } from './lib/conversion'
 import { buildDisplayTree, collectIds, countNodes } from './lib/tree'
 import { Viewer } from './viewer/Viewer'
@@ -20,6 +23,7 @@ const line = (ok: boolean, label: string, detail = '') =>
 export default function SelfTest({ path }: { path: string }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [log, setLog] = useState<string[]>([])
+  const [panelData, setPanelData] = useState<ItemData | null>(null)
 
   useEffect(() => {
     if (!hostRef.current) return
@@ -194,16 +198,335 @@ export default function SelfTest({ path }: { path: string }) {
         await viewer.fitToModel()
         say('OK   vista completa')
 
-        // Encuadrar un elemento concreto: en un modelo de kilometros es la
-        // unica forma de ver algo con detalle, y ejercita el renderizado de
-        // cerca, que depende del plano `near`.
-        const conGeom = await viewer.getIdsWithGeometry()
-        if (conGeom.length > 0) {
-          const foco = conGeom.slice(0, 3)
-          await viewer.fitToItems(foco)
-          await viewer.highlight(foco[0])
-          check(true, 'enfocar elementos concretos', `ids ${foco.join(', ')}`)
+        // --- Enfocar seleccion ---
+        //
+        // Se reproduce el camino real de la interfaz, que no es el mismo que
+        // enfocar ids elegidos a mano: al pulsar un nodo del arbol la
+        // seleccion es `collectIds(nodo)`, e incluye contenedores espaciales
+        // que no tienen geometria propia. Cada intento va con limite de
+        // tiempo, porque el sintoma reportado es que la aplicacion se queda
+        // colgada, no que falle.
+        const conLimite = async (
+          etiqueta: string,
+          accion: () => Promise<void>,
+          ms = 8000,
+        ) => {
+          const t = performance.now()
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const veredicto = await Promise.race([
+            accion().then(
+              () => 'completo',
+              (e) => `excepcion: ${e instanceof Error ? e.message : e}`,
+            ),
+            new Promise<string>((r) => {
+              timer = setTimeout(() => r('COLGADO'), ms)
+            }),
+          ])
+          clearTimeout(timer)
+          const seg = ((performance.now() - t) / 1000).toFixed(1)
+          check(veredicto === 'completo', `enfocar ${etiqueta}`, `${veredicto} en ${seg} s`)
+          return veredicto
         }
+
+        const buscar = (pred: (n: (typeof roots)[number]) => boolean) => {
+          const pila = [...roots]
+          while (pila.length) {
+            const n = pila.pop()!
+            if (pred(n)) return n
+            pila.push(...n.children)
+          }
+          return null
+        }
+
+        const conGeom = await viewer.getIdsWithGeometry()
+        const conGeomSet = new Set(conGeom)
+
+        // a) Ids con geometria garantizada: el caso que ya se sabia bueno.
+        if (conGeom.length > 0) {
+          await conLimite(`${Math.min(3, conGeom.length)} elementos con geometria`, () =>
+            viewer.fitToItems(conGeom.slice(0, 3)),
+          )
+        }
+
+        // b) Una hoja del arbol, que es lo que mas se pulsa en la practica.
+        const hoja = buscar((n) => n.children.length === 0 && n.localId !== null)
+        if (hoja) {
+          const ids = collectIds(hoja)
+          const conG = ids.filter((i) => conGeomSet.has(i)).length
+          say(`hoja elegida: ${hoja.category}#${hoja.localId} | ${ids.length} ids, ${conG} con geometria`)
+          await conLimite('una hoja del arbol', () => viewer.fitToItems(ids))
+        }
+
+        // c) Un contenedor espacial con descendencia: mezcla ids con y sin
+        //    geometria, que es lo que distingue este camino del caso (a).
+        const contenedor = buscar((n) => n.children.length > 2)
+        if (contenedor) {
+          const ids = collectIds(contenedor)
+          const conG = ids.filter((i) => conGeomSet.has(i)).length
+          say(`contenedor elegido: ${contenedor.category}#${contenedor.localId} | ${ids.length} ids, ${conG} con geometria`)
+          await conLimite('un contenedor del arbol', () => viewer.fitToItems(ids))
+        }
+
+        // d) La raiz entera: el peor caso de todos.
+        const idsRaiz = roots.flatMap(collectIds)
+        const conGRaiz = idsRaiz.filter((i) => conGeomSet.has(i)).length
+        say(`raiz: ${idsRaiz.length} ids, ${conGRaiz} con geometria`)
+        await conLimite('la raiz completa', () => viewer.fitToItems(idsRaiz))
+
+        // e) Barrido de cajas por nodo, buscando las que rompen el encuadre:
+        //    vacias (la camara no se mueve) y degeneradas o con NaN (la camara
+        //    acaba en una posicion invalida y la vista queda inutilizable).
+        const nodos: (typeof roots)[number][] = []
+        {
+          const pila = [...roots]
+          while (pila.length && nodos.length < 300) {
+            const n = pila.pop()!
+            if (n.localId !== null) nodos.push(n)
+            pila.push(...n.children)
+          }
+        }
+        let vacias = 0
+        let degeneradas = 0
+        let conNaN = 0
+        const ejemplos: string[] = []
+        for (const n of nodos) {
+          const [caja] = await viewer.getItemBoxes([n.localId!])
+          if (!caja || caja.isEmpty()) {
+            vacias += 1
+            if (ejemplos.length < 4) ejemplos.push(`vacia ${n.category}#${n.localId}`)
+            continue
+          }
+          const s = caja.getSize(new THREE.Vector3())
+          if (!Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(s.z)) {
+            conNaN += 1
+            if (ejemplos.length < 4) ejemplos.push(`NaN ${n.category}#${n.localId}`)
+          } else if (s.x === 0 && s.y === 0 && s.z === 0) {
+            degeneradas += 1
+            if (ejemplos.length < 4) ejemplos.push(`punto ${n.category}#${n.localId}`)
+          }
+        }
+        say(
+          `barrido de ${nodos.length} cajas: ${vacias} vacias, ${degeneradas} degeneradas, ${conNaN} con NaN` +
+            (ejemplos.length ? ` | ${ejemplos.join(' ; ')}` : ''),
+        )
+
+        // g) La secuencia real de la interfaz, que es lo que no reproducian
+        //    los casos anteriores: pulsar un nodo dispara highlight y la
+        //    consulta de propiedades, y solo despues llega el enfoque. Si
+        //    alguna de esas llamadas deja ocupado el worker de fragments, el
+        //    boton parece colgado aunque la aplicacion siga viva.
+        // Vigilante del hilo principal: un temporizador corto cuyo retraso
+        // delata cuanto tiempo estuvo bloqueado. Es la unica forma de medir el
+        // sintoma reportado, que es la interfaz congelada sin ningun error.
+        const vigilar = () => {
+          let maximo = 0
+          let ultimo = performance.now()
+          const id = setInterval(() => {
+            const ahora = performance.now()
+            maximo = Math.max(maximo, ahora - ultimo - 50)
+            ultimo = ahora
+          }, 50)
+          return () => {
+            clearInterval(id)
+            return maximo
+          }
+        }
+
+        const comoEnLaUI = async (nodo: (typeof roots)[number], etiqueta: string) => {
+          const ids = collectIds(nodo)
+          const parar = vigilar()
+          let t = performance.now()
+          await viewer.highlight(nodo.localId)
+          const tHigh = performance.now() - t
+
+          t = performance.now()
+          await viewer.getItemData(nodo.localId!)
+          const tProps = performance.now() - t
+
+          t = performance.now()
+          const veredicto = await Promise.race([
+            viewer.fitToItems(ids).then(() => 'completo', (e) => `excepcion: ${e}`),
+            new Promise<string>((r) => setTimeout(() => r('COLGADO'), 15000)),
+          ])
+          const tFoco = performance.now() - t
+
+          // El trabajo real llega despues del encuadre: al quedar la camara en
+          // reposo se reevalua la geometria visible, y eso corre sin esperar.
+          t = performance.now()
+          const trasFoco = await Promise.race([
+            viewer.forceUpdate().then(() => 'completo', (e) => `excepcion: ${e}`),
+            new Promise<string>((r) => setTimeout(() => r('COLGADO'), 20000)),
+          ])
+          const tUpd = performance.now() - t
+
+          // Dar margen a que corra lo que el encuadre dejo en marcha sin
+          // esperar, que es donde cabria el bloqueo.
+          await new Promise((r) => setTimeout(r, 1500))
+          const bloqueo = parar()
+
+          check(
+            trasFoco === 'completo',
+            `refresco de geometria tras enfocar ${etiqueta}`,
+            `${(tUpd / 1000).toFixed(1)} s -> ${trasFoco}`,
+          )
+          check(
+            bloqueo < 1000,
+            `el hilo principal no se bloquea al enfocar ${etiqueta}`,
+            `bloqueo maximo ${Math.round(bloqueo)} ms`,
+          )
+
+          check(
+            veredicto === 'completo',
+            `secuencia de UI sobre ${etiqueta}`,
+            `${nodo.category}#${nodo.localId} | ${ids.length} ids | highlight ${(tHigh / 1000).toFixed(1)}s` +
+              ` + propiedades ${(tProps / 1000).toFixed(1)}s + enfoque ${(tFoco / 1000).toFixed(1)}s -> ${veredicto}`,
+          )
+        }
+
+        if (hoja) await comoEnLaUI(hoja, 'una hoja')
+        if (contenedor) await comoEnLaUI(contenedor, 'un contenedor')
+        if (roots[0]?.localId !== null && roots[0]) await comoEnLaUI(roots[0], 'la raiz')
+
+        let hojas: (typeof roots) = []
+        let peorId = 0
+
+        // h) Forma de los datos que alimentan el panel de propiedades.
+        //    El panel renderiza los grupos de forma recursiva y expandidos por
+        //    defecto, asi que un elemento con relaciones muy anidadas bloquea
+        //    el hilo principal al pintarlo, sin lanzar ningun error.
+        {
+          // Tope alto a proposito: con uno bajo no se distingue "profundo" de
+          // "ciclico", y la diferencia decide el arreglo.
+          let topeAlcanzado = false
+          const medir = (d: unknown, prof = 0): { nodos: number; prof: number } => {
+            if (prof > 400) { topeAlcanzado = true; return { nodos: 1, prof } }
+            if (Array.isArray(d)) {
+              let n = 0
+              let p = prof
+              for (const x of d) {
+                const r = medir(x, prof + 1)
+                n += r.nodos
+                p = Math.max(p, r.prof)
+              }
+              return { nodos: n, prof: p }
+            }
+            if (d && typeof d === 'object') {
+              let n = 1
+              let p = prof
+              for (const v of Object.values(d as Record<string, unknown>)) {
+                const r = medir(v, prof + 1)
+                n += r.nodos
+                p = Math.max(p, r.prof)
+              }
+              return { nodos: n, prof: p }
+            }
+            return { nodos: 1, prof }
+          }
+
+          hojas = nodos.filter((n) => conGeomSet.has(n.localId!)).slice(0, 25)
+          let peorNodos = 0
+          let peorProf = 0
+          let tTotal = 0
+          for (const n of hojas) {
+            const t = performance.now()
+            const d = await viewer.getItemData(n.localId!)
+            tTotal += performance.now() - t
+            if (!d) continue
+            const r = medir(d)
+            if (r.nodos > peorNodos) { peorNodos = r.nodos; peorProf = r.prof; peorId = n.localId! }
+          }
+          say(
+            `propiedades de ${hojas.length} elementos: ${(tTotal / hojas.length).toFixed(0)} ms de media` +
+              ` | peor caso #${peorId}: ${peorNodos} nodos, profundidad ${peorProf}` +
+              (topeAlcanzado ? ' | TOPE DE 400 ALCANZADO: estructura ciclica o sin fin' : ''),
+          )
+          check(
+            !topeAlcanzado && peorNodos < 20000 && peorProf < 40,
+            'los datos de propiedades son razonables para pintarlos',
+            `maximo ${peorNodos} nodos y profundidad ${peorProf}`,
+          )
+        }
+
+        // i) Verificar la poda y, sobre todo, pintar el panel de verdad.
+        //    Hasta ahora la prueba montaba su propio arbol y nunca el panel de
+        //    propiedades, que es justo donde estaba el bloqueo.
+        {
+          const resumen = (d: unknown) => {
+            let nodos = 0
+            let prof = 0
+            let tope = false
+            const rec = (x: unknown, p: number) => {
+              if (p > 400) { tope = true; return }
+              prof = Math.max(prof, p)
+              if (Array.isArray(x)) { for (const y of x) rec(y, p + 1); return }
+              if (x && typeof x === 'object') {
+                nodos += 1
+                for (const v of Object.values(x as Record<string, unknown>)) rec(v, p + 1)
+              }
+            }
+            rec(d, 0)
+            return { nodos, prof, tope }
+          }
+          const propsVisibles = (d: unknown): number => {
+            let n = 0
+            const rec = (x: unknown, p: number) => {
+              if (p > 50) return
+              if (Array.isArray(x)) { for (const y of x) rec(y, p + 1); return }
+              if (x && typeof x === 'object') {
+                const o = x as Record<string, unknown>
+                const nom = o.Name as { value?: unknown } | undefined
+                const val = (o.NominalValue ?? o.Value) as { value?: unknown } | undefined
+                if (nom?.value !== undefined && val?.value !== undefined) n += 1
+                for (const v of Object.values(o)) rec(v, p + 1)
+              }
+            }
+            rec(d, 0)
+            return n
+          }
+
+          const idPeor = peorId || hojas[0]?.localId
+          const datos = idPeor ? await viewer.getItemData(idPeor) : null
+          if (datos) {
+            const r = resumen(datos)
+            const props = propsVisibles(datos)
+            check(
+              !r.tope && r.prof < 40,
+              'los datos de propiedades quedan acotados',
+              `#${idPeor}: ${r.nodos} nodos, profundidad ${r.prof}${r.tope ? ' (CICLICO)' : ''}`,
+            )
+            check(
+              props > 0,
+              'la poda conserva las propiedades utiles',
+              `${props} propiedades con nombre y valor`,
+            )
+
+            // Render real del panel, midiendo el bloqueo del hilo principal.
+            const parar = vigilar()
+            const t = performance.now()
+            setPanelData(datos)
+            await new Promise((r2) => setTimeout(r2, 2000))
+            const bloqueo = parar()
+            check(
+              bloqueo < 1000,
+              'pintar el panel de propiedades no bloquea el hilo',
+              `bloqueo maximo ${Math.round(bloqueo)} ms, ${((performance.now() - t) / 1000).toFixed(1)} s en total`,
+            )
+          }
+        }
+
+        // f) Estado de la camara tras los encuadres: si quedo en NaN, la vista
+        //    deja de responder aunque la aplicacion siga viva.
+        const cam = viewer.getCameraState()
+        const finita =
+          Number.isFinite(cam.posicion.x) &&
+          Number.isFinite(cam.posicion.y) &&
+          Number.isFinite(cam.posicion.z) &&
+          Number.isFinite(cam.distancia)
+        check(
+          finita && cam.distancia > 0,
+          'la camara queda en un estado valido',
+          `pos (${cam.posicion.x.toFixed(1)}, ${cam.posicion.y.toFixed(1)}, ${cam.posicion.z.toFixed(1)}) | distancia ${cam.distancia.toFixed(2)}`,
+        )
 
         // --- Segunda pasada: debe venir del cache ---
         const t1 = performance.now()
@@ -216,6 +539,19 @@ export default function SelfTest({ path }: { path: string }) {
         )
 
         say(failures === 0 ? '=== SELFTEST OK ===' : `=== SELFTEST CON ${failures} FALLAS ===`)
+
+        // Comprobacion del diagnostico: pintar la estructura SIN podar, que es
+        // lo que hacia la version instalada. Va al final y despues del
+        // veredicto a proposito: si cuelga, el log se corta justo aqui y eso
+        // es exactamente la prueba que se busca.
+        if (import.meta.env.VITE_SELFTEST_RAW && peorId) {
+          say('>>> pintando datos SIN podar; si el log termina aqui, el bloqueo queda reproducido')
+          const crudo = await viewer.getItemDataSinPodar(peorId)
+          const parar2 = vigilar()
+          setPanelData(crudo)
+          await new Promise((r) => setTimeout(r, 4000))
+          say(`<<< sobrevivio: bloqueo maximo ${Math.round(parar2())} ms`)
+        }
       } catch (err) {
         failures += 1
         say(`FALLA excepcion :: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
@@ -246,6 +582,9 @@ export default function SelfTest({ path }: { path: string }) {
         {log.join('\n')}
       </pre>
       <div ref={hostRef} style={{ flex: 1, position: 'relative' }} />
+      <div style={{ width: 320, overflow: 'auto', background: '#1b1f24' }}>
+        <PropertiesPanel data={panelData} loading={false} />
+      </div>
     </div>
   )
 }

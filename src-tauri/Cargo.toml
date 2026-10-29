@@ -1,6 +1,6 @@
 [package]
 name = "visor-ifc"
-version = "0.1.0"
+version = "0.1.1"
 description = "Visor de archivos IFC"
 authors = ["LEN"]
 license = ""

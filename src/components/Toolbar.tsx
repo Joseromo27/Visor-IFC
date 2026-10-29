@@ -21,6 +21,7 @@ interface Props {
   onEnfocarSeleccion: () => void
   onVistaPanoramica: () => void
   onTransparentar: () => void
+  onInvertirTransparencia: () => void
   onQuitarTransparencia: () => void
   onCambiarOpacidad: (valor: number) => void
   onCambiarNavegacion: (modo: Navegacion) => void
@@ -40,6 +41,7 @@ export function Toolbar({
   onEnfocarSeleccion,
   onVistaPanoramica,
   onTransparentar,
+  onInvertirTransparencia,
   onQuitarTransparencia,
   onCambiarOpacidad,
   onCambiarNavegacion,
@@ -86,6 +88,14 @@ export function Toolbar({
           title="Aplica la transparencia elegida a la seleccion"
         >
           Transparentar
+        </button>
+        <button
+          className="btn"
+          onClick={onInvertirTransparencia}
+          disabled={!haySeleccion || ocupado}
+          title="Deja translucido todo menos la seleccion, para verla en su contexto"
+        >
+          Invertir
         </button>
         <label className="deslizador" title="Nivel de opacidad">
           <input

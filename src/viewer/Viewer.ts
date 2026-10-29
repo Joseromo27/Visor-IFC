@@ -121,6 +121,18 @@ export class Viewer {
       dom,
     })
 
+    // El punto exacto del clic pasa a ser el centro de giro y de zoom, sin
+    // mover la camara. En un modelo de kilometros es la diferencia entre
+    // acercarse a lo que miras y alejarte hacia el centro del proyecto.
+    //
+    // `setOrbitPoint` no debe ejecutarse mientras la camara esta animando, de
+    // ahi la comprobacion: durante un encuadre en curso deja las posiciones
+    // inconsistentes.
+    const controles = this.world.camera.controls
+    if (hit && !controles.active) {
+      controles.setOrbitPoint(hit.point.x, hit.point.y, hit.point.z)
+    }
+
     const localId = hit?.localId ?? null
     await this.highlight(localId)
     this.onSelect?.(localId)
@@ -371,6 +383,24 @@ export class Viewer {
     if (!this.model || localIds.length === 0) return
     const valor = Math.min(1, Math.max(0, opacidad))
     await this.model.setOpacity(localIds, valor)
+    await this.fragments.core.update(true)
+  }
+
+  /**
+   * Deja translucido todo menos lo indicado.
+   *
+   * Es el uso habitual al revisar un modelo: ver un elemento en su contexto
+   * sin que el resto lo tape. Se limpia la transparencia previa antes de
+   * aplicar la nueva, o al cambiar de seleccion se irian acumulando capas.
+   */
+  async invertOpacity(localIds: number[], opacidad: number) {
+    if (!this.model || localIds.length === 0) return
+    const seleccion = new Set(localIds)
+    const resto = [...this.idsConGeometria].filter((id) => !seleccion.has(id))
+    if (resto.length === 0) return
+
+    await this.model.resetOpacity(undefined)
+    await this.model.setOpacity(resto, Math.min(1, Math.max(0, opacidad)))
     await this.fragments.core.update(true)
   }
 

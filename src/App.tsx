@@ -275,6 +275,9 @@ export default function App() {
           onEnfocarSeleccion={act((v) => v.fitToItems(selectedIds))}
           onVistaPanoramica={act((v) => v.resetView())}
           onTransparentar={act((v) => v.setOpacity(selectedIds, ajustes.opacidad))}
+          onInvertirTransparencia={act((v) =>
+            v.invertOpacity(selectedIds, ajustes.opacidad),
+          )}
           onQuitarTransparencia={act((v) => v.resetOpacity())}
           onCambiarOpacidad={(opacidad) => cambiarAjustes({ opacidad })}
           onCambiarNavegacion={(navegacion) => cambiarAjustes({ navegacion })}

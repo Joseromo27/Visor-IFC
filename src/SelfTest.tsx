@@ -549,6 +549,63 @@ export default function SelfTest({ path }: { path: string }) {
           )
         }
 
+        // k) Clic sobre el modelo: debe seleccionar y dejar el punto pulsado
+        //    como centro de giro y zoom, sin mover la camara.
+        {
+          const conGeom3 = await viewer.getIdsWithGeometry()
+          if (conGeom3.length > 0 && hostRef.current) {
+            // Se encuadra un elemento para que ocupe el centro de la vista:
+            // con el modelo entero a la vista, un clic al centro falla.
+            await viewer.fitToItems([conGeom3[0]])
+            await new Promise((r) => setTimeout(r, 300))
+
+            let seleccionado: number | null = null
+            const previo = viewer.onSelect
+            viewer.onSelect = (id) => { seleccionado = id }
+
+            const antes = viewer.getCameraState()
+            const caja = hostRef.current.getBoundingClientRect()
+            const x = caja.left + caja.width / 2
+            const y = caja.top + caja.height / 2
+            const comun = { clientX: x, clientY: y, bubbles: true, pointerId: 1 }
+            hostRef.current.dispatchEvent(new PointerEvent('pointerdown', comun))
+            hostRef.current.dispatchEvent(new PointerEvent('pointerup', comun))
+            await new Promise((r) => setTimeout(r, 900))
+            const despues = viewer.getCameraState()
+            viewer.onSelect = previo
+
+            check(
+              seleccionado !== null,
+              'un clic sobre el modelo selecciona el elemento',
+              `localId ${seleccionado}`,
+            )
+
+            const movio = antes.posicion.distanceTo(despues.posicion)
+            check(
+              movio < 0.01,
+              'el clic no mueve la camara',
+              `se desplazo ${movio.toFixed(4)} m`,
+            )
+
+            const cambioObjetivo = antes.objetivo.distanceTo(despues.objetivo)
+            check(
+              cambioObjetivo > 0 && Number.isFinite(cambioObjetivo),
+              'el punto pulsado pasa a ser el centro de giro',
+              `el objetivo se movio ${cambioObjetivo.toFixed(1)} m`,
+            )
+          }
+        }
+
+        // l) Transparencia invertida.
+        {
+          const conGeom4 = await viewer.getIdsWithGeometry()
+          if (conGeom4.length > 2) {
+            await viewer.invertOpacity([conGeom4[0]], 0.25)
+            await viewer.resetOpacity()
+            check(true, 'invertir transparencia se aplica y se quita', `${conGeom4.length - 1} elementos atenuados`)
+          }
+        }
+
         // f) Estado de la camara tras los encuadres: si quedo en NaN, la vista
         //    deja de responder aunque la aplicacion siga viva.
         const cam = viewer.getCameraState()

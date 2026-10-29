@@ -700,3 +700,22 @@ body {
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+/* Aviso breve sobre el visor, para que un clic sin resultado no parezca una
+   averia. No intercepta el raton: el usuario sigue pudiendo pulsar debajo. */
+.aviso-flotante {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  max-width: 80%;
+  text-align: center;
+}

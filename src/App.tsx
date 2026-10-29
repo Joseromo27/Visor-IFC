@@ -67,6 +67,7 @@ export default function App() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateProgress, setUpdateProgress] = useState<number | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [avisoClic, setAvisoClic] = useState(false)
 
   const [ajustes, setAjustes] = useState<Ajustes>(() => leerAjustes())
   const [ajustesAbiertos, setAjustesAbiertos] = useState(false)
@@ -93,9 +94,20 @@ export default function App() {
     (localId: number | null) => {
       setSelectedIds(localId === null ? [] : [localId])
       void showProperties(localId)
+
+      // Pulsar donde no hay nada no hacia absolutamente nada, y en un modelo
+      // de kilometros los elementos ocupan pocos pixeles: es facil fallar y
+      // concluir que la seleccion esta rota. Mejor decirlo.
+      setAvisoClic(localId === null)
     },
     [showProperties],
   )
+
+  useEffect(() => {
+    if (!avisoClic) return
+    const t = setTimeout(() => setAvisoClic(false), 2600)
+    return () => clearTimeout(t)
+  }, [avisoClic])
 
   // --- Arranque ------------------------------------------------------------
 
@@ -181,6 +193,18 @@ export default function App() {
     },
     [],
   )
+
+  // Solo en modo prueba de interfaz: permite abrir un archivo sin pasar por
+  // el dialogo nativo, que no se puede automatizar.
+  useEffect(() => {
+    if (!import.meta.env.VITE_SELFTEST_UI) return
+    window.__pruebaAbrir = openPath
+    window.__pruebaVisor = () => viewerRef.current
+    return () => {
+      delete window.__pruebaAbrir
+      delete window.__pruebaVisor
+    }
+  }, [openPath])
 
   const handleOpen = useCallback(async () => {
     const path = await pickIfcFile()
@@ -356,6 +380,13 @@ export default function App() {
             <div className="placeholder">
               <p>Arrastra un archivo .ifc aqui</p>
               <p className="placeholder-sub">o usa el boton Abrir IFC</p>
+            </div>
+          )}
+
+          {avisoClic && !busy && (
+            <div className="aviso-flotante">
+              No hay ningun elemento en ese punto. Acercate con la rueda o
+              selecciona desde el arbol.
             </div>
           )}
 

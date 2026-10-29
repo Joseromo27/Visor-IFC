@@ -568,8 +568,16 @@ export default function SelfTest({ path }: { path: string }) {
             const x = caja.left + caja.width / 2
             const y = caja.top + caja.height / 2
             const comun = { clientX: x, clientY: y, bubbles: true, pointerId: 1 }
-            hostRef.current.dispatchEvent(new PointerEvent('pointerdown', comun))
-            hostRef.current.dispatchEvent(new PointerEvent('pointerup', comun))
+
+            // Se dispara sobre el lienzo, no sobre el contenedor: es donde cae
+            // el raton de verdad, y el evento tiene que propagarse hacia
+            // arriba para llegar al manejador. Lanzarlo sobre el contenedor se
+            // salta justamente ese tramo, que es donde puede romperse.
+            const lienzo = hostRef.current.querySelector('canvas')
+            check(lienzo !== null, 'el lienzo existe dentro del contenedor')
+            const destino: EventTarget = lienzo ?? hostRef.current
+            destino.dispatchEvent(new PointerEvent('pointerdown', comun))
+            destino.dispatchEvent(new PointerEvent('pointerup', comun))
             await new Promise((r) => setTimeout(r, 900))
             const despues = viewer.getCameraState()
             viewer.onSelect = previo
@@ -585,6 +593,16 @@ export default function SelfTest({ path }: { path: string }) {
               movio < 0.01,
               'el clic no mueve la camara',
               `se desplazo ${movio.toFixed(4)} m`,
+            )
+
+            // Lo que faltaba comprobar: que el resaltado quede realmente
+            // puesto. Antes solo se verificaba que onSelect se disparara, que
+            // es otra cosa.
+            const resaltados = await viewer.getHighlighted()
+            check(
+              seleccionado !== null && resaltados.includes(seleccionado),
+              'el elemento pulsado queda resaltado',
+              `resaltados: [${resaltados.join(', ')}] | pulsado: ${seleccionado}`,
             )
 
             const cambioObjetivo = antes.objetivo.distanceTo(despues.objetivo)
@@ -604,6 +622,24 @@ export default function SelfTest({ path }: { path: string }) {
             await viewer.resetOpacity()
             check(true, 'invertir transparencia se aplica y se quita', `${conGeom4.length - 1} elementos atenuados`)
           }
+        }
+
+        // m) Colores de material: de donde sale el naranja que se ve.
+        {
+          const ids = (await viewer.getIdsWithGeometry()).slice(0, 200)
+          const colores = await viewer.getColors(ids)
+          const porColor = new Map<string, number>()
+          for (const c of colores) {
+            porColor.set(c.color, (porColor.get(c.color) ?? 0) + c.cuantos)
+          }
+          say(
+            `colores de material en ${ids.length} elementos: ` +
+              [...porColor.entries()]
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8)
+                .map(([c, n]) => `${c} x${n}`)
+                .join('  '),
+          )
         }
 
         // f) Estado de la camara tras los encuadres: si quedo en NaN, la vista

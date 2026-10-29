@@ -22,6 +22,21 @@ const FONDO: Record<Tema, number> = {
   claro: 0xe8eaed,
 }
 
+/**
+ * Elementos cuyo color se reemplaza en tema claro.
+ *
+ * El firme viene de Istram en un naranja que sobre fondo claro no sugiere
+ * hormigon. Se identifica por nombre y no por clase porque el IFC no lo
+ * distingue: los mismos IfcBuildingElementProxy son firme, terraplen o
+ * desmonte segun como los llamo el exportador.
+ *
+ * En tema oscuro no se toca nada: alli el naranja funciona y es el color que
+ * el modelo trae de origen.
+ */
+const COLORES_TEMA_CLARO: { patron: RegExp; color: number }[] = [
+  { patron: /^firme/i, color: 0x4a4e52 },
+]
+
 const HIGHLIGHT: FRAGS.MaterialDefinition = {
   color: new THREE.Color(0x2f7de1),
   renderedFaces: FRAGS.RenderedFaces.TWO,
@@ -43,6 +58,11 @@ export class Viewer {
   private container: HTMLElement | null = null
   /** Ids con geometria del modelo cargado, para filtrar encuadres. */
   private idsConGeometria = new Set<number>()
+  /** Ids afectados por cada regla de color, resueltos al cargar. */
+  private idsRecoloreables: number[][] = []
+  private temaActual: Tema = 'oscuro'
+  /** Lo que hay resaltado ahora, para poder quitarlo sin borrar mas. */
+  private resaltados: number[] = []
 
   /** Se dispara al hacer clic en el modelo. `null` al hacer clic en vacio. */
   onSelect: ((localId: number | null) => void) | null = null
@@ -159,7 +179,9 @@ export class Viewer {
     })
 
     this.idsConGeometria = new Set(await this.model.getItemsIdsWithGeometry())
+    await this.resolverRecoloreables()
     this.adjustCameraPlanes()
+    await this.aplicarColoresDeTema(this.temaActual)
     await this.fragments.core.update(true)
     if (opciones?.encuadrar !== false) await this.fitToModel()
     return this.model
@@ -267,6 +289,59 @@ export class Viewer {
     return names
   }
 
+  /** Proyecta un punto del mundo a coordenadas del lienzo. Para diagnostico. */
+  proyectar(punto: THREE.Vector3): { x: number; y: number } | null {
+    const dom = this.world.renderer?.three.domElement
+    if (!dom) return null
+    const v = punto.clone().project(this.world.camera.three)
+    if (v.z > 1) return null
+    const r = dom.getBoundingClientRect()
+    return {
+      x: r.left + ((v.x + 1) / 2) * r.width,
+      y: r.top + ((1 - v.y) / 2) * r.height,
+    }
+  }
+
+  /** Centro de la caja de un elemento, en coordenadas del mundo. */
+  async centroDe(localId: number): Promise<THREE.Vector3 | null> {
+    if (!this.model) return null
+    const [caja] = await this.model.getBoxes([localId])
+    if (!caja || caja.isEmpty()) return null
+    return caja.getCenter(new THREE.Vector3())
+  }
+
+  /** Ids actualmente resaltados. Para comprobar que la seleccion cuaja. */
+  async getHighlighted(): Promise<number[]> {
+    if (!this.model) return []
+    return this.model.getHighlightItemIds()
+  }
+
+  /** Colores de material de un lote de elementos. Para diagnostico. */
+  async getColors(localIds: number[]) {
+    if (!this.model) return []
+    const defs = await this.model.getItemsMaterialDefinition(localIds)
+    const aHex = (c: unknown) => {
+      // La definicion vuelve del worker serializada: es un objeto plano con
+      // r, g y b, no una instancia de THREE.Color.
+      if (c instanceof THREE.Color) return `#${c.getHexString()}`
+      const o = c as { r?: number; g?: number; b?: number }
+      if (
+        typeof o?.r !== 'number' ||
+        typeof o?.g !== 'number' ||
+        typeof o?.b !== 'number'
+      ) {
+        return 'desconocido'
+      }
+      return `#${new THREE.Color(o.r, o.g, o.b).getHexString()}`
+    }
+    return defs.map((d) => ({
+      // La API agrupa: una definicion de material vale para varios elementos.
+      cuantos: d.localIds.length,
+      color: aHex(d.definition.color),
+      opacidad: d.definition.opacity,
+    }))
+  }
+
   /** Diagnostico del encuadre: dimensiones y centro del modelo. */
   getBoxInfo(): { size: THREE.Vector3; center: THREE.Vector3 } | null {
     if (!this.model) return null
@@ -342,13 +417,42 @@ export class Viewer {
     return podado
   }
 
+  /**
+   * Resalta un elemento, o quita el resaltado con `null`.
+   *
+   * No se usa `resetHighlight()` sin argumentos: los colores propios del tema
+   * se aplican por el mismo canal interno que el resaltado, asi que borrarlo
+   * entero devolvia el firme a su color original en cuanto se pulsaba
+   * cualquier elemento. Se limpia solo lo que estaba resaltado y se le
+   * devuelve su color de tema si le correspondia.
+   */
   async highlight(localId: number | null) {
     if (!this.model) return
-    await this.model.resetHighlight()
+
+    if (this.resaltados.length > 0) {
+      await this.model.resetHighlight(this.resaltados)
+      await this.reaplicarColorDeTema(this.resaltados)
+    }
+
+    this.resaltados = localId !== null ? [localId] : []
     if (localId !== null) {
       await this.model.highlight([localId], HIGHLIGHT)
     }
     await this.fragments.core.update(true)
+  }
+
+  /** Devuelve el color de tema a los ids indicados que lo tuvieran. */
+  private async reaplicarColorDeTema(ids: number[]) {
+    if (!this.model || this.temaActual !== 'claro' || ids.length === 0) return
+    const afectados = new Set(ids)
+    for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
+      const suyos = (this.idsRecoloreables[i] ?? []).filter((id) =>
+        afectados.has(id),
+      )
+      if (suyos.length > 0) {
+        await this.model.setColor(suyos, new THREE.Color(regla.color))
+      }
+    }
   }
 
   /** Deja visibles solo los ids indicados. */
@@ -415,9 +519,53 @@ export class Viewer {
     this.world.camera.set(modo)
   }
 
-  /** Cambia el fondo de la escena para acompanar al tema de la interfaz. */
+  /**
+   * Resuelve una vez, al cargar, que elementos afecta cada regla de color.
+   * Consultar los nombres es caro y no cambia mientras el modelo este abierto.
+   */
+  private async resolverRecoloreables() {
+    this.idsRecoloreables = COLORES_TEMA_CLARO.map(() => [])
+    if (!this.model || this.idsConGeometria.size === 0) return
+
+    const ids = [...this.idsConGeometria]
+    const nombres = await this.getNames(ids)
+    for (const id of ids) {
+      const nombre = nombres.get(id)
+      if (!nombre) continue
+      COLORES_TEMA_CLARO.forEach((regla, i) => {
+        if (regla.patron.test(nombre)) this.idsRecoloreables[i].push(id)
+      })
+    }
+  }
+
+  /** Aplica o retira los colores propios del tema claro. */
+  private async aplicarColoresDeTema(tema: Tema) {
+    if (!this.model) return
+    for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
+      const ids = this.idsRecoloreables[i]
+      if (!ids || ids.length === 0) continue
+      if (tema === 'claro') {
+        await this.model.setColor(ids, new THREE.Color(regla.color))
+      } else {
+        await this.model.resetColor(ids)
+      }
+    }
+    await this.fragments.core.update(true)
+  }
+
+  /** Cambia el fondo de la escena y los colores que dependen del tema. */
   setTheme(tema: Tema) {
+    this.temaActual = tema
     this.world.scene.three.background = new THREE.Color(FONDO[tema])
+    void this.aplicarColoresDeTema(tema)
+  }
+
+  /** Cuantos elementos afecta cada regla de color. Para diagnostico. */
+  getRecoloreables() {
+    return COLORES_TEMA_CLARO.map((r, i) => ({
+      patron: String(r.patron),
+      cuantos: this.idsRecoloreables[i]?.length ?? 0,
+    }))
   }
 
   /**
@@ -429,6 +577,10 @@ export class Viewer {
     await this.model.resetVisible()
     await this.model.resetOpacity(undefined)
     await this.model.resetHighlight()
+    this.resaltados = []
+    // resetHighlight sin argumentos tambien se lleva los colores del tema,
+    // porque comparten canal; hay que reponerlos.
+    await this.aplicarColoresDeTema(this.temaActual)
     await this.fragments.core.update(true)
     await this.fitToModel()
   }

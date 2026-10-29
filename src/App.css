@@ -5,10 +5,44 @@
   --border: #2d343d;
   --text: #e6e9ee;
   --text-dim: #98a2b3;
-  --accent: #2f7de1;
-  --accent-hover: #3d8bef;
+  --accent: #2a6cc4;
+  --accent-hover: #3a80db;
   --danger: #d64545;
+  --aviso-fondo: #1d3557;
+  --error-fondo: #4a1f1f;
+  --velo: rgba(20, 23, 26, 0.72);
+  --seleccion: rgba(47, 125, 225, 0.22);
+  --arrastre: rgba(47, 125, 225, 0.12);
+  --texto-inactivo: #6b7684;
+  --fondo-inactivo: #1e2228;
   --row-height: 26px;
+}
+
+/* Tema claro. Los fondos no son blanco puro y el texto no es negro puro:
+   con geometria clara y lineas finas, el contraste maximo cansa la vista y
+   los bordes del modelo se pierden contra el fondo. */
+:root[data-tema='claro'] {
+  --bg: #eef0f3;
+  --bg-panel: #ffffff;
+  --bg-raised: #e4e8ee;
+  --border: #c9d0da;
+  --text: #1b2127;
+  --text-dim: #5a6472;
+  --accent: #1f68c9;
+  --accent-hover: #1a579f;
+  --danger: #b93232;
+  --aviso-fondo: #dce8f8;
+  --error-fondo: #fadede;
+  --velo: rgba(238, 240, 243, 0.78);
+  --seleccion: rgba(31, 104, 201, 0.16);
+  --arrastre: rgba(31, 104, 201, 0.1);
+  --texto-inactivo: #767e8a;
+  --fondo-inactivo: #e9ecf1;
+}
+
+/* En tema claro los avisos llevan texto oscuro, o quedan ilegibles. */
+:root[data-tema='claro'] .banner {
+  color: var(--text);
 }
 
 * {
@@ -76,14 +110,24 @@ body {
   border-color: var(--accent);
 }
 
+/* Deshabilitado por color y no por opacidad: un 40 % de opacidad se lee bien
+   sobre fondo oscuro y desaparece sobre fondo claro. */
 .btn:disabled {
-  opacity: 0.4;
+  color: var(--texto-inactivo);
+  background: var(--fondo-inactivo);
+  border-color: var(--border);
   cursor: default;
+}
+
+.btn-primary:disabled {
+  background: var(--fondo-inactivo);
+  border-color: var(--border);
 }
 
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
+  color: #fff;
   font-weight: 600;
 }
 
@@ -125,7 +169,7 @@ body {
   align-items: center;
   gap: 10px;
   padding: 7px 12px;
-  background: #1d3557;
+  background: var(--aviso-fondo);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
@@ -135,7 +179,7 @@ body {
 }
 
 .banner-error {
-  background: #4a1f1f;
+  background: var(--error-fondo);
   border-bottom-color: var(--danger);
 }
 
@@ -204,7 +248,7 @@ body {
   place-items: center;
   border: 2px dashed var(--accent);
   border-radius: 8px;
-  background: rgba(47, 125, 225, 0.12);
+  background: var(--arrastre);
   font-size: 15px;
   pointer-events: none;
 }
@@ -246,7 +290,7 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(20, 23, 26, 0.72);
+  background: var(--velo);
 }
 
 .overlay-card {
@@ -323,7 +367,7 @@ body {
 }
 
 .tree-row.is-selected {
-  background: rgba(47, 125, 225, 0.22);
+  background: var(--seleccion);
 }
 
 .tree-toggle {
@@ -339,7 +383,7 @@ body {
 
 .tree-toggle:disabled {
   cursor: default;
-  opacity: 0.35;
+  color: var(--texto-inactivo);
 }
 
 .tree-label {
@@ -512,4 +556,147 @@ body {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* --- Controles de la barra ------------------------------------------------ */
+
+.btn-activo {
+  border-color: var(--accent);
+  background: var(--seleccion);
+  font-weight: 600;
+}
+
+.grupo-opacidad {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.deslizador {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.deslizador input[type="range"] {
+  width: 90px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.deslizador-ancho input[type="range"] {
+  width: 100%;
+}
+
+.deslizador-ancho {
+  width: 100%;
+}
+
+.deslizador-valor {
+  min-width: 34px;
+  text-align: right;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.selector select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.selector select:disabled {
+  color: var(--texto-inactivo);
+  background: var(--fondo-inactivo);
+  cursor: default;
+}
+
+/* --- Dialogo de opciones -------------------------------------------------- */
+
+.modal-fondo {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--velo);
+  z-index: 10;
+}
+
+.modal {
+  width: min(460px, 90vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  outline: none;
+}
+
+.modal-cabecera {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-cabecera h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-cuerpo {
+  padding: 4px 16px 16px;
+  overflow: auto;
+}
+
+.ajuste {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ajuste:last-child {
+  border-bottom: 0;
+}
+
+.ajuste h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.ajuste-nota {
+  margin: 8px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.opciones-fila {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.casilla {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.casilla input {
+  accent-color: var(--accent);
+  cursor: pointer;
 }

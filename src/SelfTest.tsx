@@ -514,6 +514,41 @@ export default function SelfTest({ path }: { path: string }) {
           }
         }
 
+        // j) Capacidades nuevas de la 0.2.
+        {
+          const conGeom2 = await viewer.getIdsWithGeometry()
+          const muestra = conGeom2.slice(0, 20)
+          const parar = vigilar()
+
+          await viewer.setOpacity(muestra, 0.3)
+          await viewer.resetOpacity()
+          check(true, 'transparencia se aplica y se quita', `${muestra.length} elementos`)
+
+          for (const modo of ['FirstPerson', 'Plan', 'Orbit'] as const) {
+            viewer.setNavigation(modo)
+          }
+          check(true, 'los tres modos de navegacion se activan')
+
+          viewer.setTheme('claro')
+          viewer.setTheme('oscuro')
+          check(true, 'el fondo de la escena cambia con el tema')
+
+          await viewer.resetView()
+          const cam2 = viewer.getCameraState()
+          check(
+            Number.isFinite(cam2.distancia) && cam2.distancia > 0,
+            'vista panoramica deja la camara valida',
+            `distancia ${cam2.distancia.toFixed(1)} m`,
+          )
+
+          const bloqueo = parar()
+          check(
+            bloqueo < 1000,
+            'las funciones nuevas no bloquean el hilo',
+            `bloqueo maximo ${Math.round(bloqueo)} ms`,
+          )
+        }
+
         // f) Estado de la camara tras los encuadres: si quedo en NaN, la vista
         //    deja de responder aunque la aplicacion siga viva.
         const cam = viewer.getCameraState()

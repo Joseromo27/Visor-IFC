@@ -3,6 +3,8 @@ import type { ItemData } from '@thatopen/fragments'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 import { ModelTree } from './components/ModelTree'
+import { SettingsMenu } from './components/SettingsMenu'
+import { Toolbar } from './components/Toolbar'
 import { PropertiesPanel } from './components/PropertiesPanel'
 import { buildDisplayTree, collectIds, type TreeNode } from './lib/tree'
 import {
@@ -11,6 +13,12 @@ import {
   pickIfcFile,
   type LoadProgress,
 } from './lib/conversion'
+import {
+  aplicarTema,
+  guardarAjustes,
+  leerAjustes,
+  type Ajustes,
+} from './lib/settings'
 import { checkForUpdate, type UpdateInfo } from './lib/updater'
 import { Viewer } from './viewer/Viewer'
 import './App.css'
@@ -60,6 +68,9 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState<number | null>(null)
   const [dragging, setDragging] = useState(false)
 
+  const [ajustes, setAjustes] = useState<Ajustes>(() => leerAjustes())
+  const [ajustesAbiertos, setAjustesAbiertos] = useState(false)
+
   // --- Seleccion -----------------------------------------------------------
 
   // Solo actualiza el panel de propiedades. Quien llama decide que entra en
@@ -104,12 +115,30 @@ export default function App() {
     void checkForUpdate().then(setUpdate)
   }, [])
 
+  // Los ajustes se aplican y se guardan juntos: el tema toca el documento y el
+  // fondo de la escena, y la navegacion la camara.
+  useEffect(() => {
+    aplicarTema(ajustes.tema)
+    viewerRef.current?.setTheme(ajustes.tema)
+    viewerRef.current?.setNavigation(ajustes.navegacion)
+    guardarAjustes(ajustes)
+  }, [ajustes])
+
+  const cambiarAjustes = useCallback((cambio: Partial<Ajustes>) => {
+    setAjustes((previos) => ({ ...previos, ...cambio }))
+  }, [])
+
   // --- Carga de archivos ---------------------------------------------------
 
   // El guardia va en una ref y no en el estado `busy` para que `openPath`
   // mantenga una identidad estable: la suscripcion de arrastrar y soltar
   // depende de ella y no debe rehacerse cada vez que empieza o acaba una carga.
   const busyRef = useRef(false)
+
+  // Los ajustes se leen por ref dentro de openPath para que la identidad de la
+  // funcion no cambie: de ella cuelga la suscripcion de arrastrar y soltar.
+  const ajustesRef = useRef(ajustes)
+  ajustesRef.current = ajustes
 
   const openPath = useCallback(
     async (path: string) => {
@@ -130,7 +159,9 @@ export default function App() {
         const result = await loadIfc(path, setProgress)
 
         setProgress({ stage: 'escena', progress: null })
-        await viewer.loadModel(result.fragments)
+        await viewer.loadModel(result.fragments, {
+          encuadrar: ajustesRef.current.encuadrarAlAbrir,
+        })
         setRoots(buildDisplayTree(await viewer.getSpatialTree()))
 
         setMeta({
@@ -159,7 +190,12 @@ export default function App() {
   // Arrastrar y soltar: el WebView de Tauri entrega rutas reales del sistema
   // de archivos, no objetos File del navegador.
   useEffect(() => {
-    const pending = getCurrentWebview().onDragDropEvent((event) => {
+    // Fuera de Tauri no existe el puente nativo. Se degrada en vez de romper
+    // el montaje: asi la interfaz se puede abrir en un navegador para
+    // revisarla, que dentro de la ventana de Tauri no hay forma de hacerlo.
+    let pending: Promise<() => void> | null = null
+    try {
+      pending = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === 'over') {
         setDragging(true)
         return
@@ -174,9 +210,12 @@ export default function App() {
       else if (event.payload.paths.length > 0) {
         setError('El archivo arrastrado no es un .ifc')
       }
-    })
+      })
+    } catch (err) {
+      console.warn('Arrastrar y soltar no disponible fuera de Tauri', err)
+    }
     return () => {
-      void pending.then((unlisten) => unlisten())
+      void pending?.then((unlisten) => unlisten())
     }
   }, [openPath])
 
@@ -223,54 +262,24 @@ export default function App() {
   return (
     <div className="app">
       <header className="toolbar">
-        <button className="btn btn-primary" onClick={handleOpen} disabled={busy}>
-          Abrir IFC...
-        </button>
-
-        <span className="toolbar-sep" />
-
-        <button
-          className="btn"
-          onClick={act((v) => v.isolate(selectedIds))}
-          disabled={!hasSelection || busy}
-          title="Deja visible solo lo seleccionado"
-        >
-          Aislar
-        </button>
-        <button
-          className="btn"
-          onClick={act((v) => v.hide(selectedIds))}
-          disabled={!hasSelection || busy}
-        >
-          Ocultar
-        </button>
-        <button
-          className="btn"
-          onClick={act((v) => v.showAll())}
-          disabled={!hasModel || busy}
-        >
-          Mostrar todo
-        </button>
-
-        <span className="toolbar-sep" />
-
-        <button
-          className="btn"
-          onClick={act((v) => v.fitToItems(selectedIds))}
-          disabled={!hasSelection || busy}
-          title="Encuadra la camara en la seleccion"
-        >
-          Enfocar seleccion
-        </button>
-        <button
-          className="btn"
-          onClick={act((v) => v.fitToModel())}
-          disabled={!hasModel || busy}
-        >
-          Vista completa
-        </button>
-
-        <span className="toolbar-spacer" />
+        <Toolbar
+          ocupado={busy}
+          hayModelo={hasModel}
+          haySeleccion={hasSelection}
+          opacidad={ajustes.opacidad}
+          navegacion={ajustes.navegacion}
+          onAbrir={handleOpen}
+          onAislar={act((v) => v.isolate(selectedIds))}
+          onOcultar={act((v) => v.hide(selectedIds))}
+          onMostrarTodo={act((v) => v.showAll())}
+          onEnfocarSeleccion={act((v) => v.fitToItems(selectedIds))}
+          onVistaPanoramica={act((v) => v.resetView())}
+          onTransparentar={act((v) => v.setOpacity(selectedIds, ajustes.opacidad))}
+          onQuitarTransparencia={act((v) => v.resetOpacity())}
+          onCambiarOpacidad={(opacidad) => cambiarAjustes({ opacidad })}
+          onCambiarNavegacion={(navegacion) => cambiarAjustes({ navegacion })}
+          onAbrirAjustes={() => setAjustesAbiertos(true)}
+        />
 
         {meta && (
           <div className="meta" title={meta.name}>
@@ -423,6 +432,14 @@ export default function App() {
           </div>
         </aside>
       </main>
+
+      {ajustesAbiertos && (
+        <SettingsMenu
+          ajustes={ajustes}
+          onCambiar={cambiarAjustes}
+          onCerrar={() => setAjustesAbiertos(false)}
+        />
+      )}
     </div>
   )
 }

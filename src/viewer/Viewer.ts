@@ -6,6 +6,7 @@ import * as FRAGS from '@thatopen/fragments'
 import * as THREE from 'three'
 
 import { podarItemData } from '../lib/itemData'
+import type { Navegacion, Tema } from '../lib/settings'
 
 /** Worker de fragments copiado a public/ en postinstall. Se usa el archivo
  *  local en vez de `FragmentsManager.getWorker()`, que lo descarga de unpkg:
@@ -13,6 +14,13 @@ import { podarItemData } from '../lib/itemData'
 const FRAGMENTS_WORKER_URL = '/fragments-worker.mjs'
 
 const MODEL_ID = 'modelo'
+
+/** Fondos de escena por tema. El claro no es blanco puro: con geometria clara
+ *  y bordes finos, el blanco se come el contraste. */
+const FONDO: Record<Tema, number> = {
+  oscuro: 0x1b1f24,
+  claro: 0xe8eaed,
+}
 
 const HIGHLIGHT: FRAGS.MaterialDefinition = {
   color: new THREE.Color(0x2f7de1),
@@ -118,7 +126,7 @@ export class Viewer {
     this.onSelect?.(localId)
   }
 
-  async loadModel(fragments: Uint8Array) {
+  async loadModel(fragments: Uint8Array, opciones?: { encuadrar?: boolean }) {
     await this.disposeModel()
 
     // fragments se queda con el ArrayBuffer, asi que tiene que ser uno propio y
@@ -141,7 +149,7 @@ export class Viewer {
     this.idsConGeometria = new Set(await this.model.getItemsIdsWithGeometry())
     this.adjustCameraPlanes()
     await this.fragments.core.update(true)
-    await this.fitToModel()
+    if (opciones?.encuadrar !== false) await this.fitToModel()
     return this.model
   }
 
@@ -349,6 +357,50 @@ export class Viewer {
     if (!this.model) return
     await this.model.resetVisible()
     await this.fragments.core.update(true)
+  }
+
+  /**
+   * Aplica transparencia a un conjunto de elementos.
+   *
+   * `opacidad` va de 0 (invisible) a 1 (opaco). Se marca el material como
+   * transparente y se desactiva la escritura de profundidad: sin eso, un
+   * elemento translucido sigue tapando a los que tiene detras y el efecto no
+   * sirve para lo que se busca, que es ver a traves.
+   */
+  async setOpacity(localIds: number[], opacidad: number) {
+    if (!this.model || localIds.length === 0) return
+    const valor = Math.min(1, Math.max(0, opacidad))
+    await this.model.setOpacity(localIds, valor)
+    await this.fragments.core.update(true)
+  }
+
+  async resetOpacity(localIds?: number[]) {
+    if (!this.model) return
+    await this.model.resetOpacity(localIds)
+    await this.fragments.core.update(true)
+  }
+
+  /** Modo de navegacion de la camara. */
+  setNavigation(modo: Navegacion) {
+    this.world.camera.set(modo)
+  }
+
+  /** Cambia el fondo de la escena para acompanar al tema de la interfaz. */
+  setTheme(tema: Tema) {
+    this.world.scene.three.background = new THREE.Color(FONDO[tema])
+  }
+
+  /**
+   * Vuelve a la vista general: todo visible, sin transparencias ni resaltados,
+   * y la camara encuadrando el modelo completo.
+   */
+  async resetView() {
+    if (!this.model) return
+    await this.model.resetVisible()
+    await this.model.resetOpacity(undefined)
+    await this.model.resetHighlight()
+    await this.fragments.core.update(true)
+    await this.fitToModel()
   }
 
   /** Encuadra la camara sobre todo el modelo. */

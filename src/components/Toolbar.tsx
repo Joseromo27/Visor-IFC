@@ -15,6 +15,8 @@ interface Props {
   navegacion: Navegacion
 
   onAbrir: () => void
+  onAnadir: () => void
+  onCerrarTodo: () => void
   onAislar: () => void
   onOcultar: () => void
   onMostrarTodo: () => void
@@ -35,6 +37,8 @@ export function Toolbar({
   opacidad,
   navegacion,
   onAbrir,
+  onAnadir,
+  onCerrarTodo,
   onAislar,
   onOcultar,
   onMostrarTodo,
@@ -51,6 +55,22 @@ export function Toolbar({
     <>
       <button className="btn btn-primary" onClick={onAbrir} disabled={ocupado}>
         Abrir IFC...
+      </button>
+      <button
+        className="btn"
+        onClick={onAnadir}
+        disabled={!hayModelo || ocupado}
+        title="Monta otro IFC junto a los ya abiertos, en su posicion real"
+      >
+        Anadir IFC...
+      </button>
+      <button
+        className="btn"
+        onClick={onCerrarTodo}
+        disabled={!hayModelo || ocupado}
+        title="Quita todos los modelos montados"
+      >
+        Cerrar todo
       </button>
 
       <span className="toolbar-sep" />

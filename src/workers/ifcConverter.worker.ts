@@ -200,6 +200,31 @@ self.onmessage = async (event: MessageEvent<ConvertRequest>) => {
     // funciona igual en el servidor de Vite y bajo el protocolo de Tauri.
     importer.wasm = { path: '/wasm/', absolute: true }
 
+    // La geometria se deja en las coordenadas absolutas del proyecto en vez de
+    // dejar que web-ifc la acerque al origen.
+    //
+    // Con el reposicionamiento activado cada archivo se desplaza por su cuenta
+    // y el desplazamiento queda anotado aparte, de modo que montar dos juntos
+    // obliga a deshacer el de cada uno. El dato anotado es correcto, pero el
+    // paso de deshacerlo es facil de equivocar y el error no se nota: con el
+    // sentido invertido, dos modelos de Orbital Sur daban 277 m de separacion
+    // en vez de 2108, una cifra lo bastante plausible como para pasar por
+    // buena.
+    //
+    // Sin reposicionar no hay nada que deshacer: todos los archivos de un
+    // mismo encargo comparten el sistema de coordenadas del proyecto y encajan
+    // tal cual, y el resultado se puede contrastar contra el propio IFC. El
+    // acercamiento al origen lo hace el visor restandoles a todos el mismo
+    // vector.
+    importer.webIfcSettings = { COORDINATE_TO_ORIGIN: false }
+
+    // El serializador descarta en silencio todo elemento a mas de 100 km del
+    // origen, que es la red de seguridad del reposicionamiento que acabamos de
+    // apagar. Una obra chilena esta a unos 3270 km del cero, asi que con el
+    // umbral puesto no se guardaba ni un elemento: el modelo cargaba con su
+    // arbol completo y sin nada que dibujar.
+    importer.distanceThreshold = null
+
     for (const clase of CLASES_ESPACIALES_IFC4X3) {
       importer.classes.elements.add(clase)
     }

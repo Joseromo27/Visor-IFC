@@ -81,7 +81,7 @@ export const getFileInfo = (path: string) =>
  * con la configuracion anterior se ignoran en vez de devolver un modelo viejo
  * que ya no corresponde al codigo.
  */
-const CONVERTER_VERSION = 2
+const CONVERTER_VERSION = 4
 
 /**
  * Clave de cache derivada de ruta, tamano y fecha de modificacion. Si el

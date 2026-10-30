@@ -14,7 +14,7 @@ import type { ItemData } from '@thatopen/fragments'
 
 import { PropertiesPanel } from './components/PropertiesPanel'
 import { loadIfc } from './lib/conversion'
-import { buildDisplayTree, collectIds, countNodes } from './lib/tree'
+import { buildDisplayTree, collectRefs, countNodes } from './lib/tree'
 import { Viewer } from './viewer/Viewer'
 
 const line = (ok: boolean, label: string, detail = '') =>
@@ -99,13 +99,24 @@ export default function SelfTest({ path }: { path: string }) {
         }
 
         // --- Escena ---
-        await viewer.loadModel(result.fragments)
+        const montado = await viewer.loadModel(result.fragments, {
+          nombre: result.info.name,
+          ruta: path,
+        })
         check(viewer.hasModel, 'modelo montado en la escena')
 
+        // Esta prueba monta un solo modelo, asi que trabaja con `localId`
+        // sueltos y los completa aqui. El caso de varios modelos lo cubre la
+        // prueba de interfaz, que es donde importa que no se mezclen.
+        const M = montado.modelId
+        const R = (localId: number) => ({ modelId: M, localId })
+        const idsConGeometria = () =>
+          viewer.getRefsWithGeometry().map((r) => r.localId)
+
         // --- Arbol espacial ---
-        const raw = await viewer.getSpatialTree()
-        const roots = buildDisplayTree(raw)
-        const ids = roots.flatMap(collectIds)
+        const raw = (await viewer.getSpatialTrees())[0]?.tree ?? null
+        const roots = buildDisplayTree(raw, M)
+        const ids = roots.flatMap(collectRefs).map((r) => r.localId)
         check(roots.length > 0, 'arbol espacial disponible', `raiz=${roots[0]?.category ?? '-'}`)
         check(ids.length > 0, 'el arbol tiene elementos', `${ids.length} nodos con localId`)
 
@@ -135,8 +146,8 @@ export default function SelfTest({ path }: { path: string }) {
             `caja del modelo: ${f(box.size.x)} x ${f(box.size.y)} x ${f(box.size.z)} m` +
               ` | centro (${f(box.center.x)}, ${f(box.center.y)}, ${f(box.center.z)})`,
           )
-          const idsGeom = await viewer.getIdsWithGeometry()
-          const cajas = await viewer.getItemBoxes(idsGeom.slice(0, 400))
+          const idsGeom = idsConGeometria()
+          const cajas = await viewer.getItemBoxes(idsGeom.slice(0, 400).map(R))
           const diagonales = cajas
             .filter((c) => !c.isEmpty())
             .map((c) => c.getSize(new THREE.Vector3()).length())
@@ -168,7 +179,7 @@ export default function SelfTest({ path }: { path: string }) {
         }
 
         // --- Nombres para el arbol ---
-        const nombres = await viewer.getNames(ids.slice(0, 60))
+        const nombres = await viewer.getNames(M, ids.slice(0, 60))
         check(
           nombres.size > 0,
           'nombres para etiquetar el arbol',
@@ -179,7 +190,7 @@ export default function SelfTest({ path }: { path: string }) {
         let withProps = 0
         let sample = ''
         for (const id of ids.slice(0, 40)) {
-          const data = await viewer.getItemData(id)
+          const data = await viewer.getItemData(R(id))
           if (data && Object.keys(data).length > 0) {
             withProps += 1
             if (!sample) sample = Object.keys(data).slice(0, 6).join(', ')
@@ -189,9 +200,9 @@ export default function SelfTest({ path }: { path: string }) {
 
         // --- Visibilidad y camara ---
         const subset = ids.slice(0, Math.min(25, ids.length))
-        await viewer.isolate(subset)
+        await viewer.isolate(subset.map(R))
         say('OK   aislar seleccion')
-        await viewer.hide(subset)
+        await viewer.hide(subset.map(R))
         say('OK   ocultar seleccion')
         await viewer.showAll()
         say('OK   mostrar todo')
@@ -202,7 +213,7 @@ export default function SelfTest({ path }: { path: string }) {
         //
         // Se reproduce el camino real de la interfaz, que no es el mismo que
         // enfocar ids elegidos a mano: al pulsar un nodo del arbol la
-        // seleccion es `collectIds(nodo)`, e incluye contenedores espaciales
+        // seleccion es `collectRefs(nodo)`, e incluye contenedores espaciales
         // que no tienen geometria propia. Cada intento va con limite de
         // tiempo, porque el sintoma reportado es que la aplicacion se queda
         // colgada, no que falle.
@@ -238,40 +249,40 @@ export default function SelfTest({ path }: { path: string }) {
           return null
         }
 
-        const conGeom = await viewer.getIdsWithGeometry()
+        const conGeom = idsConGeometria()
         const conGeomSet = new Set(conGeom)
 
         // a) Ids con geometria garantizada: el caso que ya se sabia bueno.
         if (conGeom.length > 0) {
           await conLimite(`${Math.min(3, conGeom.length)} elementos con geometria`, () =>
-            viewer.fitToItems(conGeom.slice(0, 3)),
+            viewer.fitToItems(conGeom.slice(0, 3).map(R)),
           )
         }
 
         // b) Una hoja del arbol, que es lo que mas se pulsa en la practica.
         const hoja = buscar((n) => n.children.length === 0 && n.localId !== null)
         if (hoja) {
-          const ids = collectIds(hoja)
+          const ids = collectRefs(hoja).map((r) => r.localId)
           const conG = ids.filter((i) => conGeomSet.has(i)).length
           say(`hoja elegida: ${hoja.category}#${hoja.localId} | ${ids.length} ids, ${conG} con geometria`)
-          await conLimite('una hoja del arbol', () => viewer.fitToItems(ids))
+          await conLimite('una hoja del arbol', () => viewer.fitToItems(ids.map(R)))
         }
 
         // c) Un contenedor espacial con descendencia: mezcla ids con y sin
         //    geometria, que es lo que distingue este camino del caso (a).
         const contenedor = buscar((n) => n.children.length > 2)
         if (contenedor) {
-          const ids = collectIds(contenedor)
+          const ids = collectRefs(contenedor).map((r) => r.localId)
           const conG = ids.filter((i) => conGeomSet.has(i)).length
           say(`contenedor elegido: ${contenedor.category}#${contenedor.localId} | ${ids.length} ids, ${conG} con geometria`)
-          await conLimite('un contenedor del arbol', () => viewer.fitToItems(ids))
+          await conLimite('un contenedor del arbol', () => viewer.fitToItems(ids.map(R)))
         }
 
         // d) La raiz entera: el peor caso de todos.
-        const idsRaiz = roots.flatMap(collectIds)
+        const idsRaiz = roots.flatMap(collectRefs).map((r) => r.localId)
         const conGRaiz = idsRaiz.filter((i) => conGeomSet.has(i)).length
         say(`raiz: ${idsRaiz.length} ids, ${conGRaiz} con geometria`)
-        await conLimite('la raiz completa', () => viewer.fitToItems(idsRaiz))
+        await conLimite('la raiz completa', () => viewer.fitToItems(idsRaiz.map(R)))
 
         // e) Barrido de cajas por nodo, buscando las que rompen el encuadre:
         //    vacias (la camara no se mueve) y degeneradas o con NaN (la camara
@@ -290,7 +301,7 @@ export default function SelfTest({ path }: { path: string }) {
         let conNaN = 0
         const ejemplos: string[] = []
         for (const n of nodos) {
-          const [caja] = await viewer.getItemBoxes([n.localId!])
+          const [caja] = await viewer.getItemBoxes([R(n.localId!)])
           if (!caja || caja.isEmpty()) {
             vacias += 1
             if (ejemplos.length < 4) ejemplos.push(`vacia ${n.category}#${n.localId}`)
@@ -333,19 +344,19 @@ export default function SelfTest({ path }: { path: string }) {
         }
 
         const comoEnLaUI = async (nodo: (typeof roots)[number], etiqueta: string) => {
-          const ids = collectIds(nodo)
+          const ids = collectRefs(nodo).map((r) => r.localId)
           const parar = vigilar()
           let t = performance.now()
-          await viewer.highlight(nodo.localId)
+          await viewer.highlight(nodo.localId === null ? null : R(nodo.localId))
           const tHigh = performance.now() - t
 
           t = performance.now()
-          await viewer.getItemData(nodo.localId!)
+          await viewer.getItemData(R(nodo.localId!))
           const tProps = performance.now() - t
 
           t = performance.now()
           const veredicto = await Promise.race([
-            viewer.fitToItems(ids).then(() => 'completo', (e) => `excepcion: ${e}`),
+            viewer.fitToItems(ids.map(R)).then(() => 'completo', (e) => `excepcion: ${e}`),
             new Promise<string>((r) => setTimeout(() => r('COLGADO'), 15000)),
           ])
           const tFoco = performance.now() - t
@@ -429,7 +440,7 @@ export default function SelfTest({ path }: { path: string }) {
           let tTotal = 0
           for (const n of hojas) {
             const t = performance.now()
-            const d = await viewer.getItemData(n.localId!)
+            const d = await viewer.getItemData(R(n.localId!))
             tTotal += performance.now() - t
             if (!d) continue
             const r = medir(d)
@@ -485,7 +496,7 @@ export default function SelfTest({ path }: { path: string }) {
           }
 
           const idPeor = peorId || hojas[0]?.localId
-          const datos = idPeor ? await viewer.getItemData(idPeor) : null
+          const datos = idPeor ? await viewer.getItemData(R(idPeor)) : null
           if (datos) {
             const r = resumen(datos)
             const props = propsVisibles(datos)
@@ -516,11 +527,11 @@ export default function SelfTest({ path }: { path: string }) {
 
         // j) Capacidades nuevas de la 0.2.
         {
-          const conGeom2 = await viewer.getIdsWithGeometry()
+          const conGeom2 = idsConGeometria()
           const muestra = conGeom2.slice(0, 20)
           const parar = vigilar()
 
-          await viewer.setOpacity(muestra, 0.3)
+          await viewer.setOpacity(muestra.map(R), 0.3)
           await viewer.resetOpacity()
           check(true, 'transparencia se aplica y se quita', `${muestra.length} elementos`)
 
@@ -552,16 +563,16 @@ export default function SelfTest({ path }: { path: string }) {
         // k) Clic sobre el modelo: debe seleccionar y dejar el punto pulsado
         //    como centro de giro y zoom, sin mover la camara.
         {
-          const conGeom3 = await viewer.getIdsWithGeometry()
+          const conGeom3 = idsConGeometria()
           if (conGeom3.length > 0 && hostRef.current) {
             // Se encuadra un elemento para que ocupe el centro de la vista:
             // con el modelo entero a la vista, un clic al centro falla.
-            await viewer.fitToItems([conGeom3[0]])
+            await viewer.fitToItems([R(conGeom3[0])])
             await new Promise((r) => setTimeout(r, 300))
 
             let seleccionado: number | null = null
             const previo = viewer.onSelect
-            viewer.onSelect = (id) => { seleccionado = id }
+            viewer.onSelect = (r) => { seleccionado = r?.localId ?? null }
 
             const antes = viewer.getCameraState()
             const caja = hostRef.current.getBoundingClientRect()
@@ -616,9 +627,9 @@ export default function SelfTest({ path }: { path: string }) {
 
         // l) Transparencia invertida.
         {
-          const conGeom4 = await viewer.getIdsWithGeometry()
+          const conGeom4 = idsConGeometria()
           if (conGeom4.length > 2) {
-            await viewer.invertOpacity([conGeom4[0]], 0.25)
+            await viewer.invertOpacity([R(conGeom4[0])], 0.25)
             await viewer.resetOpacity()
             check(true, 'invertir transparencia se aplica y se quita', `${conGeom4.length - 1} elementos atenuados`)
           }
@@ -626,8 +637,8 @@ export default function SelfTest({ path }: { path: string }) {
 
         // m) Colores de material: de donde sale el naranja que se ve.
         {
-          const ids = (await viewer.getIdsWithGeometry()).slice(0, 200)
-          const colores = await viewer.getColors(ids)
+          const ids = (idsConGeometria()).slice(0, 200)
+          const colores = await viewer.getColors(ids.map(R))
           const porColor = new Map<string, number>()
           for (const c of colores) {
             porColor.set(c.color, (porColor.get(c.color) ?? 0) + c.cuantos)
@@ -674,7 +685,7 @@ export default function SelfTest({ path }: { path: string }) {
         // es exactamente la prueba que se busca.
         if (import.meta.env.VITE_SELFTEST_RAW && peorId) {
           say('>>> pintando datos SIN podar; si el log termina aqui, el bloqueo queda reproducido')
-          const crudo = await viewer.getItemDataSinPodar(peorId)
+          const crudo = await viewer.getItemDataSinPodar(R(peorId))
           const parar2 = vigilar()
           setPanelData(crudo)
           await new Promise((r) => setTimeout(r, 4000))

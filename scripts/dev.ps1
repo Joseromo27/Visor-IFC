@@ -12,6 +12,10 @@
 [CmdletBinding()]
 param(
   [string] $SelfTest,
+  # Segundo IFC: activa la parte de la prueba que monta varios modelos a la vez.
+  [string] $SelfTest2,
+  # Monta <App /> de verdad en vez del banco de humo.
+  [switch] $Ui,
   [switch] $Build
 )
 
@@ -86,7 +90,18 @@ try {
         throw "No existe el archivo IFC: $SelfTest"
       }
       $env:VITE_SELFTEST_PATH = (Resolve-Path -LiteralPath $SelfTest).Path
-      Write-Host "Prueba de humo sobre $env:VITE_SELFTEST_PATH" -ForegroundColor DarkGray
+      Write-Host "Prueba sobre $env:VITE_SELFTEST_PATH" -ForegroundColor DarkGray
+    }
+    if ($SelfTest2) {
+      if (-not (Test-Path -LiteralPath $SelfTest2)) {
+        throw "No existe el segundo archivo IFC: $SelfTest2"
+      }
+      $env:VITE_SELFTEST_PATH2 = (Resolve-Path -LiteralPath $SelfTest2).Path
+      Write-Host "Segundo modelo: $env:VITE_SELFTEST_PATH2" -ForegroundColor DarkGray
+    }
+    if ($Ui) {
+      $env:VITE_SELFTEST_UI = '1'
+      Write-Host "Prueba de interfaz: se monta la aplicacion real" -ForegroundColor DarkGray
     }
     npm run tauri dev
   }

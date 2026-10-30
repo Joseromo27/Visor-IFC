@@ -18,6 +18,10 @@ para que un modelo de kilometros se comporte.
   modelo. `Viewer.adjustCameraPlanes` recalcula `near` y `far` a partir de la
   caja del modelo cada vez que se carga uno.
 
+Se pueden montar varios IFC a la vez, cada uno en su posicion real, para ver
+como se cruzan las disciplinas. Ver [Varios modelos a la
+vez](#varios-modelos-a-la-vez).
+
 Tauri 2 (Rust + WebView del sistema) con un frontend React + Vite + TypeScript
 sobre `@thatopen/components`, `@thatopen/fragments`, `web-ifc` y Three.js.
 
@@ -46,6 +50,54 @@ configurado en `vite.config.ts` para desarrollo y en `tauri.conf.json` para
 produccion. Si no estuviera disponible, la aplicacion recurre a leer el archivo
 completo: sirve para modelos chicos, pero con ~1 GB es probable que agote la
 memoria.
+
+## Varios modelos a la vez
+
+"Anadir IFC..." monta otro archivo junto a los abiertos, en vez de reemplazarlos
+(tambien vale soltar varios de golpe en la ventana). Cada archivo aparece como
+una fila propia en el arbol, con un ojo para apagarlo y ver que hay debajo.
+
+Lo unico delicado aqui es la georreferencia.
+
+El camino habitual es dejar que web-ifc acerque cada archivo al origen
+(`COORDINATE_TO_ORIGIN`, activado por defecto) y deshacer ese desplazamiento al
+montarlo, con el dato que el conversor anota aparte. El dato es correcto, pero
+el paso de deshacerlo es facil de equivocar y **el error no se nota**: con la
+resta en sentido contrario, dos de los modelos de Orbital Sur quedaban a 277 m
+en vez de a 2108, que es una separacion perfectamente creible para dos
+disciplinas de la misma obra. Solo al montar el archivo de 741 MB, donde el
+mismo fallo daba 26 km, se hizo visible.
+
+Lo que se hace en su lugar es no reposicionar nada: el worker fija
+`COORDINATE_TO_ORIGIN: false`, con lo que la geometria llega en las coordenadas
+absolutas del proyecto y **todos los archivos de un mismo encargo comparten
+sistema sin tocarlos**; no queda ningun desplazamiento que interpretar.
+`Viewer.coordinar` solo les resta a todos el mismo vector, el centro del primer
+modelo montado, para acercarlos al origen: una obra chilena esta a unos 3,3
+millones de metros del cero y a esa distancia la camara y el raton trabajan con
+numeros incomodos. Al ser la misma resta para todos, las posiciones relativas
+quedan intactas y la alineacion sale exacta por construccion, ademas de poderse
+contrastar contra el propio IFC.
+
+Hay que apagar ademas `distanceThreshold`, que es la red de seguridad del
+reposicionamiento: el serializador **descarta en silencio** todo elemento a mas
+de 100 km del origen, y una obra chilena esta a unos 3270 km. Con el umbral
+puesto, el modelo carga con su arbol completo y sin un solo elemento que
+dibujar; de ahi el aviso explicito cuando un archivo se abre sin geometria.
+
+Trabajar tan lejos del origen no cuesta precision. Fragments guarda la posicion
+de cada elemento en doble precision (`writeFloat64` en su `Transform`; solo las
+direcciones van en float32), los vertices son locales a cada geometria, y a cada
+malla se le pone su matriz en vez de hornear la posicion en el buffer. Three.js
+compone `padre × malla` en coma flotante de 64 bits antes de subir nada a la
+GPU, y como el padre resta justo el origen comun, lo que llega a la tarjeta son
+numeros pequenos: el residuo de la cancelacion queda en torno a 0,3 mm.
+
+La transformacion se escribe en `model.object`, que es lo que miran el dibujado,
+el rayo y las cajas, asi que la seleccion sigue cayendo donde se ve el elemento.
+
+Como los `localId` solo son unicos dentro de su archivo, desde aqui todo el
+visor identifica un elemento con `Ref = { modelId, localId }`.
 
 ## Rendimiento medido
 
@@ -124,6 +176,29 @@ aplicacion ejecuta la secuencia, escribe el resultado en el log y se cierra con
 codigo distinto de cero si algo falla. En un build normal esa variable no existe
 y el componente no se incluye.
 
+Con `-Ui` se monta `<App />` de verdad en vez del banco de humo, y se le dan
+clics reales al lienzo. Existe porque la prueba de humo armaba su propio
+arranque del visor: daba verde mientras el panel de propiedades congelaba la
+ventana, y volvio a darlo con un clic desplazado el ancho del panel lateral.
+Con `-SelfTest2` se anade un segundo IFC y se comprueba el montaje multiple.
+
+```powershell
+.\scripts\dev.ps1 -Ui -SelfTest 'C:\ruta\troncal.ifc' -SelfTest2 'C:\ruta\drenaje.ifc'
+```
+
+Lo que esa parte comprueba no es que se vean dos cosas, sino las dos formas en
+que esto se rompe sin avisar: que el segundo modelo caiga lejos de su sitio, y
+que el rayo deje de cuadrar en un modelo desplazado. La primera version de la
+comprobacion exigia solo que el desplazamiento no fuese cero, cosa que cumple
+igual de bien un error de miles de kilometros; ahora exige que la distancia
+entre centros quepa dentro de la diagonal del modelo mayor, que es lo que acabo
+delatando el problema de la georreferencia.
+
+La referencia independiente con la que se contrasto todo esto sale de los
+propios IFC, sin pasar por la libreria: sumando el origen del `IfcSite` a los
+emplazamientos de los elementos, los centros reales de los tres archivos de
+Orbital Sur caen a menos de 200 m entre si.
+
 Referencia con un IFC4X3 de 32 MB y 1351 elementos con geometria, sobre un
 i7-11800H: conversion en 7-9 s, reapertura desde cache en 0,1 s, arbol de 1639
 nodos.
@@ -187,14 +262,16 @@ El workflow deja el release en borrador para revisarlo antes de publicarlo.
 src/
   App.tsx                       interfaz principal
   SelfTest.tsx                  prueba de humo del flujo completo
+  UiTest.tsx                    prueba sobre la interfaz real, con clics
   components/ModelTree.tsx      arbol jerarquico, montado de forma perezosa
   components/PropertiesPanel.tsx  property sets del elemento seleccionado
   lib/bridge.ts                 protocolo del SharedArrayBuffer
   lib/conversion.ts             dialogo, cache y orquestacion del worker
-  lib/tree.ts                   aplanado del arbol espacial de fragments
+  lib/tree.ts                   aplanado del arbol espacial, una raiz por archivo
   lib/log.ts                    reenvio de la consola del WebView al log de Rust
   lib/updater.ts                actualizacion automatica
-  viewer/Viewer.ts              escena, camara, seleccion y visibilidad
+  viewer/Viewer.ts              escena, camara, seleccion, visibilidad y
+                                coordinacion entre modelos
   workers/ifcConverter.worker.ts  conversion IFC -> Fragments
 src-tauri/
   src/commands.rs               metadatos, ruta de cache y lectura por trozos

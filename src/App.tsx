@@ -6,7 +6,7 @@ import { ModelTree } from './components/ModelTree'
 import { SettingsMenu } from './components/SettingsMenu'
 import { Toolbar } from './components/Toolbar'
 import { PropertiesPanel } from './components/PropertiesPanel'
-import { buildDisplayTree, collectIds, type TreeNode } from './lib/tree'
+import { collectRefs, modelRoot, type TreeNode } from './lib/tree'
 import {
   STAGE_LABELS,
   loadIfc,
@@ -20,7 +20,7 @@ import {
   type Ajustes,
 } from './lib/settings'
 import { checkForUpdate, type UpdateInfo } from './lib/updater'
-import { Viewer } from './viewer/Viewer'
+import { claveRef, Viewer, type ModeloMontado, type Ref } from './viewer/Viewer'
 import './App.css'
 
 const formatSize = (bytes: number) =>
@@ -48,6 +48,18 @@ interface ModelMeta {
   elapsedMs: number
 }
 
+/** Resumen del ultimo archivo abierto y de cuantos hay montados. */
+const resumenCabecera = (meta: ModelMeta, modelos: ModeloMontado[]) =>
+  modelos.length > 1
+    ? `${modelos.length} modelos montados - ${formatCount(
+        modelos.reduce((t, m) => t + m.elementos, 0),
+      )} elementos`
+    : `${formatSize(meta.size)}${
+        meta.fromCache
+          ? ` - desde cache en ${formatElapsed(meta.elapsedMs)}`
+          : ` - convertido en ${formatElapsed(meta.elapsedMs)}`
+      }`
+
 export default function App() {
   const canvasRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
@@ -58,11 +70,14 @@ export default function App() {
   const [meta, setMeta] = useState<ModelMeta | null>(null)
 
   const [roots, setRoots] = useState<TreeNode[]>([])
-  const [names, setNames] = useState<Map<number, string>>(new Map())
-  const [selected, setSelected] = useState<number | null>(null)
-  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [names, setNames] = useState<Map<string, string>>(new Map())
+  const [selected, setSelected] = useState<Ref | null>(null)
+  const [selectedRefs, setSelectedRefs] = useState<Ref[]>([])
   const [itemData, setItemData] = useState<ItemData | null>(null)
   const [loadingProps, setLoadingProps] = useState(false)
+
+  const [modelos, setModelos] = useState<ModeloMontado[]>([])
+  const [ocultos, setOcultos] = useState<Set<string>>(new Set())
 
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateProgress, setUpdateProgress] = useState<number | null>(null)
@@ -77,28 +92,28 @@ export default function App() {
   // Solo actualiza el panel de propiedades. Quien llama decide que entra en
   // `selectedIds`, porque no es lo mismo un clic en el modelo (un elemento)
   // que un clic en el arbol (un nodo y toda su descendencia).
-  const showProperties = useCallback(async (localId: number | null) => {
-    setSelected(localId)
+  const showProperties = useCallback(async (ref: Ref | null) => {
+    setSelected(ref)
     setItemData(null)
-    if (localId === null) return
+    if (ref === null) return
 
     setLoadingProps(true)
     try {
-      setItemData((await viewerRef.current?.getItemData(localId)) ?? null)
+      setItemData((await viewerRef.current?.getItemData(ref)) ?? null)
     } finally {
       setLoadingProps(false)
     }
   }, [])
 
   const selectFromViewport = useCallback(
-    (localId: number | null) => {
-      setSelectedIds(localId === null ? [] : [localId])
-      void showProperties(localId)
+    (ref: Ref | null) => {
+      setSelectedRefs(ref === null ? [] : [ref])
+      void showProperties(ref)
 
       // Pulsar donde no hay nada no hacia absolutamente nada, y en un modelo
       // de kilometros los elementos ocupan pocos pixeles: es facil fallar y
       // concluir que la seleccion esta rota. Mejor decirlo.
-      setAvisoClic(localId === null)
+      setAvisoClic(ref === null)
     },
     [showProperties],
   )
@@ -152,29 +167,70 @@ export default function App() {
   const ajustesRef = useRef(ajustes)
   ajustesRef.current = ajustes
 
+  /**
+   * Abre un IFC. Con `anadir` lo monta junto a los que ya estan; sin el,
+   * reemplaza lo abierto, que es lo que espera quien solo revisa un archivo.
+   */
   const openPath = useCallback(
-    async (path: string) => {
+    async (path: string, anadir = false) => {
       const viewer = viewerRef.current
       if (!viewer || busyRef.current) return
+
+      // Montar dos veces el mismo archivo deja dos copias superpuestas, que
+      // ademas aparecen como interferencia perfecta de todo contra todo.
+      if (anadir && viewer.modeloDeRuta(path)) {
+        setError('Ese archivo ya esta montado.')
+        return
+      }
 
       busyRef.current = true
       setBusy(true)
       setError(null)
-      setRoots([])
-      setNames(new Map())
       setSelected(null)
-      setSelectedIds([])
+      setSelectedRefs([])
       setItemData(null)
+      if (!anadir) {
+        await viewer.disposeAll()
+        setRoots([])
+        setNames(new Map())
+        setModelos([])
+        setOcultos(new Set())
+      }
       setProgress({ stage: 'lectura', progress: null })
 
       try {
         const result = await loadIfc(path, setProgress)
 
         setProgress({ stage: 'escena', progress: null })
-        await viewer.loadModel(result.fragments, {
-          encuadrar: ajustesRef.current.encuadrarAlAbrir,
+        const montado = await viewer.loadModel(result.fragments, {
+          nombre: result.info.name,
+          ruta: path,
+          // Al anadir no se reencuadra: quien monta un segundo modelo suele
+          // estar mirando una zona concreta y saltar a la vista general le
+          // hace perder el sitio.
+          encuadrar: anadir ? false : ajustesRef.current.encuadrarAlAbrir,
         })
-        setRoots(buildDisplayTree(await viewer.getSpatialTree()))
+
+        const tree = (await viewer.getSpatialTrees()).find(
+          (t) => t.modelId === montado.modelId,
+        )
+        const raiz = modelRoot(
+          montado.modelId,
+          montado.nombre,
+          tree?.tree ?? null,
+        )
+        setRoots((previos) => [...previos, raiz])
+        setModelos(viewer.getModelos())
+
+        // Un modelo con arbol pero sin nada que dibujar deja el visor en
+        // blanco sin decir por que. Pasa cuando la conversion descarta la
+        // geometria, y cuesta mucho de diagnosticar si no se avisa.
+        if (montado.elementos === 0) {
+          setError(
+            `${montado.nombre} se abrio sin geometria: tiene estructura pero` +
+              ' ningun elemento que mostrar.',
+          )
+        }
 
         setMeta({
           name: result.info.name,
@@ -184,7 +240,7 @@ export default function App() {
         })
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
-        setMeta(null)
+        if (!anadir) setMeta(null)
       } finally {
         busyRef.current = false
         setBusy(false)
@@ -211,6 +267,49 @@ export default function App() {
     if (path) await openPath(path)
   }, [openPath])
 
+  const handleAnadir = useCallback(async () => {
+    const path = await pickIfcFile()
+    if (path) await openPath(path, true)
+  }, [openPath])
+
+  const handleCerrarTodo = useCallback(async () => {
+    const viewer = viewerRef.current
+    if (!viewer || busyRef.current) return
+    await viewer.disposeAll()
+    setRoots([])
+    setNames(new Map())
+    setModelos([])
+    setOcultos(new Set())
+    setSelected(null)
+    setSelectedRefs([])
+    setItemData(null)
+    setMeta(null)
+  }, [])
+
+  /**
+   * Muestra u oculta un modelo entero desde su fila en el arbol.
+   *
+   * La llamada al visor va fuera del actualizador de estado a proposito: React
+   * invoca los actualizadores dos veces en desarrollo, y un efecto colateral
+   * ahi dentro alternaria el modelo dos veces, con lo que el boton pareceria
+   * no hacer nada.
+   */
+  const handleAlternarModelo = useCallback(
+    (modelId: string) => {
+      const viewer = viewerRef.current
+      if (!viewer) return
+      const mostrar = ocultos.has(modelId)
+      setOcultos((previos) => {
+        const siguiente = new Set(previos)
+        if (mostrar) siguiente.delete(modelId)
+        else siguiente.add(modelId)
+        return siguiente
+      })
+      void viewer.setModelVisible(modelId, mostrar)
+    },
+    [ocultos],
+  )
+
   // Arrastrar y soltar: el WebView de Tauri entrega rutas reales del sistema
   // de archivos, no objetos File del navegador.
   useEffect(() => {
@@ -227,11 +326,17 @@ export default function App() {
       setDragging(false)
       if (event.payload.type !== 'drop') return
 
-      const path = event.payload.paths.find((p) =>
+      // Soltar varios IFC a la vez los monta todos: el primero reemplaza lo
+      // abierto y los demas se suman. Es la forma natural de pedir una
+      // comparacion entre disciplinas sin pasar por el boton de anadir.
+      const rutas = event.payload.paths.filter((p) =>
         p.toLowerCase().endsWith('.ifc'),
       )
-      if (path) void openPath(path)
-      else if (event.payload.paths.length > 0) {
+      if (rutas.length > 0) {
+        void (async () => {
+          for (const [i, ruta] of rutas.entries()) await openPath(ruta, i > 0)
+        })()
+      } else if (event.payload.paths.length > 0) {
         setError('El archivo arrastrado no es un .ifc')
       }
       })
@@ -245,19 +350,37 @@ export default function App() {
 
   // --- Acciones ------------------------------------------------------------
 
-  // Los nombres llegan por lotes segun se abren nodos del arbol.
-  const loadNames = useCallback(async (ids: number[]) => {
-    const found = await viewerRef.current?.getNames(ids)
-    if (!found || found.size === 0) return
+  // Los nombres llegan por lotes segun se abren nodos del arbol. Van por
+  // modelo porque es como los pide el visor, y se guardan con la clave
+  // compuesta: dos archivos distintos repiten los mismos localId.
+  const loadNames = useCallback(async (refs: Ref[]) => {
+    const viewer = viewerRef.current
+    if (!viewer || refs.length === 0) return
+
+    const porModelo = new Map<string, number[]>()
+    for (const r of refs) {
+      const lista = porModelo.get(r.modelId)
+      if (lista) lista.push(r.localId)
+      else porModelo.set(r.modelId, [r.localId])
+    }
+
+    const encontrados: [string, string][] = []
+    for (const [modelId, localIds] of porModelo) {
+      for (const [localId, name] of await viewer.getNames(modelId, localIds)) {
+        encontrados.push([claveRef({ modelId, localId }), name])
+      }
+    }
+    if (encontrados.length === 0) return
+
     setNames((prev) => {
       const next = new Map(prev)
-      for (const [id, name] of found) next.set(id, name)
+      for (const [clave, name] of encontrados) next.set(clave, name)
       return next
     })
   }, [])
 
   const handleExpand = useCallback(
-    (ids: number[]) => void loadNames(ids),
+    (refs: Ref[]) => void loadNames(refs),
     [loadNames],
   )
 
@@ -268,9 +391,13 @@ export default function App() {
 
       // Aislar u ocultar un piso debe alcanzar a todo lo que cuelga de el, no
       // solo al nodo; las propiedades, en cambio, son las del nodo en si.
-      setSelectedIds(collectIds(node))
-      await viewer.highlight(node.localId)
-      await showProperties(node.localId)
+      setSelectedRefs(collectRefs(node))
+      const ref =
+        node.localId !== null
+          ? { modelId: node.modelId, localId: node.localId }
+          : null
+      await viewer.highlight(ref)
+      await showProperties(ref)
     },
     [showProperties],
   )
@@ -280,8 +407,14 @@ export default function App() {
     if (viewer) void fn(viewer)
   }
 
+  /** Toma del visor que modelos estan ocultos, en vez de suponerlo. */
+  const sincronizarOcultos = (v: Viewer) =>
+    setOcultos(
+      new Set(v.getModelos().filter((m) => !m.visible).map((m) => m.modelId)),
+    )
+
   const hasModel = roots.length > 0
-  const hasSelection = selectedIds.length > 0
+  const hasSelection = selectedRefs.length > 0
 
   return (
     <div className="app">
@@ -293,14 +426,27 @@ export default function App() {
           opacidad={ajustes.opacidad}
           navegacion={ajustes.navegacion}
           onAbrir={handleOpen}
-          onAislar={act((v) => v.isolate(selectedIds))}
-          onOcultar={act((v) => v.hide(selectedIds))}
-          onMostrarTodo={act((v) => v.showAll())}
-          onEnfocarSeleccion={act((v) => v.fitToItems(selectedIds))}
-          onVistaPanoramica={act((v) => v.resetView())}
-          onTransparentar={act((v) => v.setOpacity(selectedIds, ajustes.opacidad))}
+          onAnadir={() => void handleAnadir()}
+          onCerrarTodo={() => void handleCerrarTodo()}
+          onAislar={act(async (v) => {
+            await v.isolate(selectedRefs)
+            sincronizarOcultos(v)
+          })}
+          onOcultar={act((v) => v.hide(selectedRefs))}
+          onMostrarTodo={act(async (v) => {
+            await v.showAll()
+            setOcultos(new Set())
+          })}
+          onEnfocarSeleccion={act((v) => v.fitToItems(selectedRefs))}
+          onVistaPanoramica={act(async (v) => {
+            await v.resetView()
+            setOcultos(new Set())
+          })}
+          onTransparentar={act((v) =>
+            v.setOpacity(selectedRefs, ajustes.opacidad),
+          )}
           onInvertirTransparencia={act((v) =>
-            v.invertOpacity(selectedIds, ajustes.opacidad),
+            v.invertOpacity(selectedRefs, ajustes.opacidad),
           )}
           onQuitarTransparencia={act((v) => v.resetOpacity())}
           onCambiarOpacidad={(opacidad) => cambiarAjustes({ opacidad })}
@@ -309,14 +455,14 @@ export default function App() {
         />
 
         {meta && (
-          <div className="meta" title={meta.name}>
-            <strong>{meta.name}</strong>
-            <span>
-              {formatSize(meta.size)}
-              {meta.fromCache
-                ? ` - desde cache en ${formatElapsed(meta.elapsedMs)}`
-                : ` - convertido en ${formatElapsed(meta.elapsedMs)}`}
-            </span>
+          <div
+            className="meta"
+            title={modelos.map((m) => m.nombre).join('\n') || meta.name}
+          >
+            <strong>
+              {modelos.length > 1 ? 'Varios modelos' : meta.name}
+            </strong>
+            <span>{resumenCabecera(meta, modelos)}</span>
           </div>
         )}
       </header>
@@ -367,8 +513,10 @@ export default function App() {
               roots={roots}
               selected={selected}
               names={names}
+              ocultos={ocultos}
               onSelect={handleTreeSelect}
               onExpand={handleExpand}
+              onAlternarModelo={handleAlternarModelo}
             />
           </div>
         </aside>

@@ -370,6 +370,45 @@ body {
   background: var(--seleccion);
 }
 
+/* Fila del archivo. Se distingue de la jerarquia interna porque con varios
+   IFC montados hay que poder ver de un vistazo donde empieza cada uno. */
+.tree-row-modelo {
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.tree-row-modelo:hover {
+  background: var(--bg-raised);
+}
+
+/* Un modelo oculto se atenua, pero sigue legible: hay que poder encontrarlo
+   para volver a mostrarlo. */
+.tree-row-modelo.is-oculto .tree-label {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.tree-ojo {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 20px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tree-ojo:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
 .tree-toggle {
   width: 16px;
   flex: 0 0 16px;

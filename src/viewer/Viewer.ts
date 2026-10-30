@@ -13,7 +13,30 @@ import type { Navegacion, Tema } from '../lib/settings'
  *  la aplicacion tiene que funcionar sin conexion. */
 const FRAGMENTS_WORKER_URL = '/fragments-worker.mjs'
 
-const MODEL_ID = 'modelo'
+/**
+ * Identifica un elemento cuando hay varios modelos montados.
+ *
+ * Los `localId` solo son unicos dentro de su modelo: dos IFC distintos tienen
+ * elementos con el mismo numero. Desde que se puede montar mas de uno, ningun
+ * sitio puede quedarse con el `localId` suelto.
+ */
+export type Ref = { modelId: string; localId: number }
+
+export const mismaRef = (a: Ref | null, b: Ref | null) =>
+  a === b || (!!a && !!b && a.modelId === b.modelId && a.localId === b.localId)
+
+export const claveRef = (r: Ref) => `${r.modelId}:${r.localId}`
+
+/** Agrupa referencias por modelo, que es como hay que pedir casi todo. */
+const agrupar = (refs: Ref[]): Map<string, number[]> => {
+  const porModelo = new Map<string, number[]>()
+  for (const r of refs) {
+    const lista = porModelo.get(r.modelId)
+    if (lista) lista.push(r.localId)
+    else porModelo.set(r.modelId, [r.localId])
+  }
+  return porModelo
+}
 
 /** Fondos de escena por tema. El claro no es blanco puro: con geometria clara
  *  y bordes finos, el blanco se come el contraste. */
@@ -63,26 +86,80 @@ type World = OBC.SimpleWorld<
   OBC.SimpleRenderer
 >
 
+/** Un modelo montado y lo que hay que recordar de el. */
+type Entrada = {
+  model: FRAGS.FragmentsModel
+  /** Nombre de archivo, para la interfaz. */
+  nombre: string
+  /** Ruta en disco. Sirve para no montar dos veces el mismo archivo. */
+  ruta: string
+  /** Ids con geometria, para filtrar encuadres. */
+  idsConGeometria: Set<number>
+  /** Ids afectados por cada regla de color, resueltos al cargar. */
+  idsRecoloreables: number[][]
+  /** Si el modelo esta mostrado u oculto entero desde la lista. */
+  visible: boolean
+}
+
+export type ModeloMontado = {
+  modelId: string
+  nombre: string
+  ruta: string
+  elementos: number
+  visible: boolean
+}
+
 export class Viewer {
   private components = new OBC.Components()
   private world!: World
   private fragments!: OBC.FragmentsManager
-  private model: FRAGS.FragmentsModel | null = null
+  private modelos = new Map<string, Entrada>()
   private container: HTMLElement | null = null
-  /** Ids con geometria del modelo cargado, para filtrar encuadres. */
-  private idsConGeometria = new Set<number>()
-  /** Ids afectados por cada regla de color, resueltos al cargar. */
-  private idsRecoloreables: number[][] = []
   private temaActual: Tema = 'oscuro'
   /** Elemento seleccionado y elemento bajo el cursor. */
-  private seleccionado: number | null = null
-  private sobrevolado: number | null = null
+  private seleccionado: Ref | null = null
+  private sobrevolado: Ref | null = null
+  /** Contador para generar identificadores de modelo unicos. */
+  private siguienteId = 1
+
+  /**
+   * Punto del proyecto que se lleva al origen de la escena.
+   *
+   * El conversor deja la geometria en las coordenadas absolutas del proyecto
+   * (ver `COORDINATE_TO_ORIGIN` en el worker), asi que todos los archivos de
+   * un mismo encargo ya comparten sistema y encajan sin tocarlos. Lo unico que
+   * hace falta es acercarlos al origen, porque una obra chilena esta a varios
+   * millones de metros del cero y a esa distancia la camara y el raton
+   * trabajan con numeros incomodos.
+   *
+   * Lo fija el primer modelo que se monta y **no cambia despues**: es la misma
+   * resta para todos, que es justo lo que conserva intactas las posiciones
+   * relativas entre archivos.
+   */
+  private origenComun: THREE.Vector3 | null = null
 
   /** Se dispara al hacer clic en el modelo. `null` al hacer clic en vacio. */
-  onSelect: ((localId: number | null) => void) | null = null
+  onSelect: ((ref: Ref | null) => void) | null = null
 
   get hasModel() {
-    return this.model !== null
+    return this.modelos.size > 0
+  }
+
+  /** Modelos montados, en orden de montaje. */
+  getModelos(): ModeloMontado[] {
+    return [...this.modelos.entries()].map(([modelId, e]) => ({
+      modelId,
+      nombre: e.nombre,
+      ruta: e.ruta,
+      elementos: e.idsConGeometria.size,
+      visible: e.visible,
+    }))
+  }
+
+  /** Busca si ya hay montado un archivo con esa ruta. */
+  modeloDeRuta(ruta: string): string | null {
+    for (const [modelId, e] of this.modelos) if (e.ruta === ruta) return modelId
+    return null
   }
 
   init(container: HTMLElement) {
@@ -141,7 +218,7 @@ export class Viewer {
     // desplazar requieren mantenerlo, y durante el arrastre el resultado no
     // interesa. No se usa `controls.active`, que con el amortiguado de la
     // libreria se queda practicamente siempre en cierto y lo bloqueaba todo.
-    if (!this.model || this.downAt) return
+    if (!this.hasModel || this.downAt) return
 
     const ahora = performance.now()
     if (ahora - this.ultimoHover < 90 || this.hoverEnCurso) return
@@ -155,7 +232,7 @@ export class Viewer {
           new THREE.Vector2(e.clientX, e.clientY),
           dom,
         )
-        await this.setHover(hit?.localId ?? null)
+        await this.setHover(hit ? refDe(hit) : null)
       } finally {
         this.hoverEnCurso = false
       }
@@ -173,12 +250,38 @@ export class Viewer {
   private handlePointerUp = (e: PointerEvent) => {
     const from = this.downAt
     this.downAt = null
-    if (!from || !this.model) return
+    if (!from || !this.hasModel) return
 
     const moved = Math.hypot(e.clientX - from.x, e.clientY - from.y)
     if (moved > 4) return
 
     void this.pick(e)
+  }
+
+  /**
+   * Lanza un rayo contra todos los modelos y devuelve el impacto mas cercano.
+   *
+   * Hay que preguntar modelo por modelo: fragments no cruza modelos en un solo
+   * rayo. Se queda el mas cercano a la camara, que es el que esta visualmente
+   * encima, y no el del primer modelo que conteste.
+   */
+  private async tirarRayo(
+    x: number,
+    y: number,
+    dom: HTMLCanvasElement,
+  ): Promise<FRAGS.RaycastResult | null> {
+    const camera = this.world.camera.three
+    const mouse = new THREE.Vector2(x, y)
+    const impactos = (
+      await Promise.all(
+        [...this.modelos.values()]
+          .filter((e) => e.visible)
+          .map((e) => e.model.raycast({ camera, mouse, dom })),
+      )
+    ).filter((r): r is FRAGS.RaycastResult => !!r)
+
+    if (impactos.length === 0) return null
+    return impactos.reduce((a, b) => (a.distance <= b.distance ? a : b))
   }
 
   /**
@@ -201,12 +304,9 @@ export class Viewer {
     // posicion del lienzo: fragments ya le resta su getBoundingClientRect por
     // dentro. Restarsela aqui tambien desplazaba el punto probado el ancho del
     // panel lateral, y habia que apuntar a la derecha del objeto para tocarlo.
-    if (!this.model) return null
-    const camera = this.world.camera.three
-    const tirar = (x: number, y: number) =>
-      this.model!.raycast({ camera, mouse: new THREE.Vector2(x, y), dom })
+    if (!this.hasModel) return null
 
-    const exacto = await tirar(mouse.x, mouse.y)
+    const exacto = await this.tirarRayo(mouse.x, mouse.y, dom)
     if (exacto) return exacto
 
     const angulos = [0, 45, 90, 135, 180, 225, 270, 315]
@@ -215,9 +315,10 @@ export class Viewer {
         await Promise.all(
           angulos.map((g) => {
             const rad = (g * Math.PI) / 180
-            return tirar(
+            return this.tirarRayo(
               mouse.x + Math.cos(rad) * radio,
               mouse.y + Math.sin(rad) * radio,
+              dom,
             )
           }),
         )
@@ -231,7 +332,7 @@ export class Viewer {
   }
 
   private async pick(e: PointerEvent) {
-    if (!this.container || !this.model) return
+    if (!this.container || !this.hasModel) return
 
     const dom = this.world.renderer!.three.domElement
     const mouse = new THREE.Vector2(e.clientX, e.clientY)
@@ -250,14 +351,22 @@ export class Viewer {
       controles.setOrbitPoint(hit.point.x, hit.point.y, hit.point.z)
     }
 
-    const localId = hit?.localId ?? null
-    await this.highlight(localId)
-    this.onSelect?.(localId)
+    const ref = hit ? refDe(hit) : null
+    await this.highlight(ref)
+    this.onSelect?.(ref)
   }
 
-  async loadModel(fragments: Uint8Array, opciones?: { encuadrar?: boolean }) {
-    await this.disposeModel()
-
+  /**
+   * Monta un modelo mas sin quitar los que ya estan.
+   *
+   * Devuelve el identificador asignado, que es con lo que se le habla a partir
+   * de ahi. Se genera aqui y no se usa la ruta como clave para que sea corto y
+   * para que no dependa de como escriba una ruta el sistema de archivos.
+   */
+  async loadModel(
+    fragments: Uint8Array,
+    opciones: { nombre: string; ruta: string; encuadrar?: boolean },
+  ): Promise<ModeloMontado> {
     // fragments se queda con el ArrayBuffer, asi que tiene que ser uno propio y
     // completo. El que llega del worker ya lo es (viene transferido, no
     // copiado), y copiarlo igualmente duplicaria mas de 100 MB en un modelo
@@ -270,22 +379,79 @@ export class Viewer {
       ? (fragments.buffer as ArrayBuffer)
       : (fragments.slice().buffer as ArrayBuffer)
 
-    this.model = await this.fragments.core.load(buffer, {
-      modelId: MODEL_ID,
+    const modelId = `m${this.siguienteId++}`
+
+    const model = await this.fragments.core.load(buffer, {
+      modelId,
       camera: this.world.camera.three,
     })
 
-    this.idsConGeometria = new Set(await this.model.getItemsIdsWithGeometry())
-    await this.resolverRecoloreables()
+    this.coordinar(model)
+
+    const entrada: Entrada = {
+      model,
+      nombre: opciones.nombre,
+      ruta: opciones.ruta,
+      idsConGeometria: new Set(await model.getItemsIdsWithGeometry()),
+      idsRecoloreables: [],
+      visible: true,
+    }
+    this.modelos.set(modelId, entrada)
+
+    await this.resolverRecoloreables(entrada)
     this.adjustCameraPlanes()
     await this.aplicarColoresDeTema(this.temaActual)
     await this.fragments.core.update(true)
-    if (opciones?.encuadrar !== false) await this.fitToModel()
-    return this.model
+    if (opciones.encuadrar !== false) await this.fitToModel()
+
+    return {
+      modelId,
+      nombre: entrada.nombre,
+      ruta: entrada.ruta,
+      elementos: entrada.idsConGeometria.size,
+      visible: entrada.visible,
+    }
   }
 
   /**
-   * Ajusta los planos de recorte al tamano real del modelo.
+   * Acerca un modelo al origen de la escena, sin alterar su posicion relativa.
+   *
+   * No se usa `getCoordinationMatrix()` de la libreria. Ese camino exige
+   * deshacer, por cada archivo, el desplazamiento que web-ifc le aplico al
+   * acercarlo al origen, y equivocar el sentido de esa resta no salta a la
+   * vista: daba 277 m de separacion entre dos modelos que estan a 2108, que es
+   * una cifra perfectamente creible. Aqui la geometria ya llega en
+   * coordenadas del proyecto, asi que no hay nada que deshacer y basta con
+   * restarles a todos el mismo vector: la alineacion sale exacta por
+   * construccion y se puede contrastar contra el propio IFC.
+   *
+   * Se escribe sobre `object`, que es lo que miran tanto el dibujado como el
+   * rayo y las cajas, asi que la seleccion sigue cayendo donde se ve el
+   * elemento.
+   */
+  private coordinar(model: FRAGS.FragmentsModel) {
+    if (!this.origenComun) {
+      const caja = model.box
+      if (caja.isEmpty()) return
+      this.origenComun = caja.getCenter(new THREE.Vector3())
+    }
+    model.object.position.copy(this.origenComun).negate()
+    model.object.updateMatrixWorld(true)
+  }
+
+  /** Caja que engloba todos los modelos montados. */
+  private cajaTotal(): THREE.Box3 {
+    const total = new THREE.Box3()
+    total.makeEmpty()
+    for (const { model } of this.modelos.values()) {
+      const box = model.box
+      if (!box.isEmpty()) total.union(box)
+    }
+    return total
+  }
+
+  /**
+   * Ajusta los planos de recorte al tamano real de lo montado.
    *
    * Las camaras de @thatopen/components nacen con `far = 1000`, pensado para
    * edificios. Un modelo de obra lineal mide kilometros: al encuadrarlo entero
@@ -298,8 +464,7 @@ export class Viewer {
    * apreciable.
    */
   private adjustCameraPlanes() {
-    if (!this.model) return
-    const box = this.model.box
+    const box = this.cajaTotal()
     if (box.isEmpty()) return
 
     const diagonal = box.getSize(new THREE.Vector3()).length()
@@ -344,29 +509,66 @@ export class Viewer {
     return { near: c.near, far: c.far }
   }
 
-  async disposeModel() {
-    if (!this.model) return
-    await this.fragments.core.disposeModel(MODEL_ID)
-    this.model = null
-    this.idsConGeometria.clear()
+  /** Quita un modelo de la escena. */
+  async disposeModel(modelId: string) {
+    if (!this.modelos.has(modelId)) return
+    await this.fragments.core.disposeModel(modelId)
+    this.modelos.delete(modelId)
+    if (this.seleccionado?.modelId === modelId) this.seleccionado = null
+    if (this.sobrevolado?.modelId === modelId) this.sobrevolado = null
+    // El origen comun lo fijo el primer modelo. Si no queda ninguno se olvida,
+    // para que el siguiente vuelva a fijarlo; mientras quede alguno se
+    // conserva, o los que siguen montados saltarian de sitio.
+    if (this.modelos.size === 0) this.origenComun = null
+    this.adjustCameraPlanes()
+    await this.fragments.core.update(true)
   }
 
-  /** Arbol espacial del modelo: proyecto > sitio > edificio > piso > elementos. */
-  async getSpatialTree(): Promise<FRAGS.SpatialTreeItem | null> {
-    if (!this.model) return null
-    return this.model.getSpatialStructure()
+  /** Quita todos los modelos. */
+  async disposeAll() {
+    for (const modelId of [...this.modelos.keys()]) {
+      await this.fragments.core.disposeModel(modelId)
+    }
+    this.modelos.clear()
+    this.seleccionado = null
+    this.sobrevolado = null
+    this.origenComun = null
+    await this.fragments.core.update(true)
+  }
+
+  /** Arboles espaciales, uno por modelo montado. */
+  async getSpatialTrees(): Promise<
+    { modelId: string; nombre: string; tree: FRAGS.SpatialTreeItem }[]
+  > {
+    const arboles: {
+      modelId: string
+      nombre: string
+      tree: FRAGS.SpatialTreeItem
+    }[] = []
+    for (const [modelId, e] of this.modelos) {
+      arboles.push({
+        modelId,
+        nombre: e.nombre,
+        tree: await e.model.getSpatialStructure(),
+      })
+    }
+    return arboles
   }
 
   /**
-   * Nombres de un lote de elementos, para etiquetar el arbol. Solo pide el
-   * atributo `Name`: traer todos los atributos de cientos de nodos a la vez
-   * tarda mas que la conversion entera.
+   * Nombres de un lote de elementos de un modelo, para etiquetar el arbol.
+   * Solo pide el atributo `Name`: traer todos los atributos de cientos de
+   * nodos a la vez tarda mas que la conversion entera.
    */
-  async getNames(localIds: number[]): Promise<Map<number, string>> {
+  async getNames(
+    modelId: string,
+    localIds: number[],
+  ): Promise<Map<number, string>> {
     const names = new Map<number, string>()
-    if (!this.model || localIds.length === 0) return names
+    const entrada = this.modelos.get(modelId)
+    if (!entrada || localIds.length === 0) return names
 
-    const data = await this.model.getItemsData(localIds, {
+    const data = await entrada.model.getItemsData(localIds, {
       attributesDefault: false,
       attributes: ['Name', '_localId'],
       relationsDefault: { attributes: false, relations: false },
@@ -394,12 +596,13 @@ export class Viewer {
    * donde se apunto. Si no coincide, las coordenadas estan desalineadas.
    */
   async sondearEn(x: number, y: number) {
-    if (!this.model) return null
+    if (!this.hasModel) return null
     const dom = this.world.renderer!.three.domElement
     const hit = await this.buscarBajoCursor(new THREE.Vector2(x, y), dom)
     if (!hit) return null
     const vuelta = this.proyectar(hit.point)
     return {
+      ref: refDe(hit),
       localId: hit.localId,
       pedido: { x, y },
       reproyectado: vuelta,
@@ -421,23 +624,27 @@ export class Viewer {
   }
 
   /** Centro de la caja de un elemento, en coordenadas del mundo. */
-  async centroDe(localId: number): Promise<THREE.Vector3 | null> {
-    if (!this.model) return null
-    const [caja] = await this.model.getBoxes([localId])
+  async centroDe(ref: Ref): Promise<THREE.Vector3 | null> {
+    const entrada = this.modelos.get(ref.modelId)
+    if (!entrada) return null
+    const [caja] = await entrada.model.getBoxes([ref.localId])
     if (!caja || caja.isEmpty()) return null
     return caja.getCenter(new THREE.Vector3())
   }
 
-  /** Ids actualmente resaltados. Para comprobar que la seleccion cuaja. */
-  async getHighlighted(): Promise<number[]> {
-    if (!this.model) return []
-    return this.model.getHighlightItemIds()
+  /** Elementos actualmente resaltados. Para comprobar que la seleccion cuaja. */
+  async getHighlighted(): Promise<Ref[]> {
+    const refs: Ref[] = []
+    for (const [modelId, e] of this.modelos) {
+      for (const localId of await e.model.getHighlightItemIds()) {
+        refs.push({ modelId, localId })
+      }
+    }
+    return refs
   }
 
   /** Colores de material de un lote de elementos. Para diagnostico. */
-  async getColors(localIds: number[]) {
-    if (!this.model) return []
-    const defs = await this.model.getItemsMaterialDefinition(localIds)
+  async getColors(refs: Ref[]) {
     const aHex = (c: unknown) => {
       // La definicion vuelve del worker serializada: es un objeto plano con
       // r, g y b, no una instancia de THREE.Color.
@@ -452,18 +659,27 @@ export class Viewer {
       }
       return `#${new THREE.Color(o.r, o.g, o.b).getHexString()}`
     }
-    return defs.map((d) => ({
-      // La API agrupa: una definicion de material vale para varios elementos.
-      cuantos: d.localIds.length,
-      color: aHex(d.definition.color),
-      opacidad: d.definition.opacity,
-    }))
+
+    const salida: { cuantos: number; color: string; opacidad?: number }[] = []
+    for (const [modelId, localIds] of agrupar(refs)) {
+      const entrada = this.modelos.get(modelId)
+      if (!entrada) continue
+      const defs = await entrada.model.getItemsMaterialDefinition(localIds)
+      for (const d of defs) {
+        salida.push({
+          // La API agrupa: una definicion de material vale para varios elementos.
+          cuantos: d.localIds.length,
+          color: aHex(d.definition.color),
+          opacidad: d.definition.opacity,
+        })
+      }
+    }
+    return salida
   }
 
-  /** Diagnostico del encuadre: dimensiones y centro del modelo. */
+  /** Diagnostico del encuadre: dimensiones y centro de lo montado. */
   getBoxInfo(): { size: THREE.Vector3; center: THREE.Vector3 } | null {
-    if (!this.model) return null
-    const box = this.model.box
+    const box = this.cajaTotal()
     if (box.isEmpty()) return null
     return {
       size: box.getSize(new THREE.Vector3()),
@@ -471,27 +687,83 @@ export class Viewer {
     }
   }
 
-  /** Cajas individuales, para detectar elementos disparados lejos del resto. */
-  async getItemBoxes(localIds: number[]) {
-    if (!this.model) return []
-    return this.model.getBoxes(localIds)
+  /** Caja de un modelo concreto, ya en el origen comun. Para diagnostico. */
+  getModelBox(modelId: string): THREE.Box3 | null {
+    const entrada = this.modelos.get(modelId)
+    if (!entrada) return null
+    const box = entrada.model.box
+    return box.isEmpty() ? null : box
   }
 
-  /** Ids de los elementos que tienen geometria. */
-  async getIdsWithGeometry(): Promise<number[]> {
-    if (!this.model) return []
-    return this.model.getItemsIdsWithGeometry()
+  /**
+   * Desplazamiento aplicado a un modelo respecto del primero montado.
+   * Sirve para comprobar que la coordinacion hizo algo, y cuanto.
+   */
+  getOffset(modelId: string): THREE.Vector3 | null {
+    const entrada = this.modelos.get(modelId)
+    if (!entrada) return null
+    return entrada.model.object.position.clone()
+  }
+
+  /**
+   * Lo que la libreria sabe de la georreferencia de cada modelo, en crudo.
+   * Para averiguar por que dos modelos no caen donde deben.
+   */
+  async getCoordsDebug() {
+    const salida: string[] = []
+    for (const [modelId, e] of this.modelos) {
+      const crudo = await e.model.getCoordinates()
+      const m = await e.model.getCoordinationMatrix()
+      const t = new THREE.Vector3().setFromMatrixPosition(m)
+      const sinTransformar = e.model.object.matrixWorld.clone().invert()
+      const cajaLocal = e.model.box.clone().applyMatrix4(sinTransformar)
+      salida.push(
+        `${modelId} (${e.nombre}): getCoordinates=[${[...crudo]
+          .map((n) => Number(n).toFixed(2))
+          .join(', ')}]` +
+          ` | traslacion de su matriz (${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)})` +
+          ` | caja sin coordinar centro (${cajaLocal
+            .getCenter(new THREE.Vector3())
+            .toArray()
+            .map((n) => n.toFixed(1))
+            .join(', ')})`,
+      )
+    }
+    return salida
+  }
+
+  /** Cajas individuales, para detectar elementos disparados lejos del resto. */
+  async getItemBoxes(refs: Ref[]) {
+    const cajas: THREE.Box3[] = []
+    for (const [modelId, localIds] of agrupar(refs)) {
+      const entrada = this.modelos.get(modelId)
+      if (!entrada) continue
+      cajas.push(...(await entrada.model.getBoxes(localIds)))
+    }
+    return cajas
+  }
+
+  /** Referencias de los elementos que tienen geometria. */
+  getRefsWithGeometry(): Ref[] {
+    const refs: Ref[] = []
+    for (const [modelId, e] of this.modelos) {
+      for (const localId of e.idsConGeometria) refs.push({ modelId, localId })
+    }
+    return refs
   }
 
   /** Cantidad de elementos con geometria. Util para contrastar contra el arbol. */
-  async getItemsWithGeometryCount(): Promise<number> {
-    return (await this.getIdsWithGeometry()).length
+  getItemsWithGeometryCount(): number {
+    let total = 0
+    for (const e of this.modelos.values()) total += e.idsConGeometria.size
+    return total
   }
 
   /** Datos sin podar. Solo para diagnostico: pintarlos cuelga la interfaz. */
-  async getItemDataSinPodar(localId: number): Promise<FRAGS.ItemData | null> {
-    if (!this.model) return null
-    const [d] = await this.model.getItemsData([localId], {
+  async getItemDataSinPodar(ref: Ref): Promise<FRAGS.ItemData | null> {
+    const entrada = this.modelos.get(ref.modelId)
+    if (!entrada) return null
+    const [d] = await entrada.model.getItemsData([ref.localId], {
       attributesDefault: true,
       relations: {
         IsDefinedBy: { attributes: true, relations: true },
@@ -510,9 +782,10 @@ export class Viewer {
    * Se poda aqui y no en el panel para que ningun consumidor pueda recibir una
    * estructura sin fin.
    */
-  async getItemData(localId: number): Promise<FRAGS.ItemData | null> {
-    if (!this.model) return null
-    const [data] = await this.model.getItemsData([localId], {
+  async getItemData(ref: Ref): Promise<FRAGS.ItemData | null> {
+    const entrada = this.modelos.get(ref.modelId)
+    if (!entrada) return null
+    const [data] = await entrada.model.getItemsData([ref.localId], {
       attributesDefault: true,
       relations: {
         IsDefinedBy: { attributes: true, relations: true },
@@ -528,7 +801,7 @@ export class Viewer {
     // puede haberse quedado fuera informacion real y conviene saberlo.
     if (info.porProfundidad > 0 || info.porPresupuesto > 0) {
       console.warn(
-        `propiedades de #${localId} truncadas: ${info.nodos} nodos conservados,` +
+        `propiedades de #${ref.localId} truncadas: ${info.nodos} nodos conservados,` +
           ` ${info.porProfundidad} cortes por profundidad y ${info.porPresupuesto} por presupuesto`,
       )
     }
@@ -544,30 +817,32 @@ export class Viewer {
    * cualquier elemento. Se limpia solo lo que estaba resaltado y se le
    * devuelve su color de tema si le correspondia.
    */
-  async highlight(localId: number | null) {
-    if (this.seleccionado === localId) return
-    const afectados = [this.seleccionado, localId].filter(
-      (x): x is number => x !== null,
+  async highlight(ref: Ref | null) {
+    if (mismaRef(this.seleccionado, ref)) return
+    const afectados = [this.seleccionado, ref].filter(
+      (x): x is Ref => x !== null,
     )
-    this.seleccionado = localId
+    this.seleccionado = ref
     await this.refrescarAspecto(afectados)
   }
 
   /** Marca el elemento bajo el cursor. `null` cuando no hay ninguno. */
-  async setHover(localId: number | null) {
-    if (this.sobrevolado === localId) return
-    const afectados = [this.sobrevolado, localId].filter(
-      (x): x is number => x !== null,
+  async setHover(ref: Ref | null) {
+    if (mismaRef(this.sobrevolado, ref)) return
+    const afectados = [this.sobrevolado, ref].filter(
+      (x): x is Ref => x !== null,
     )
-    this.sobrevolado = localId
+    this.sobrevolado = ref
     await this.refrescarAspecto(afectados)
   }
 
   /** Color de tema que le toca a un elemento, si le toca alguno. */
-  private colorDeTema(id: number): number | null {
+  private colorDeTema(modelId: string, id: number): number | null {
     if (this.temaActual !== 'claro') return null
+    const entrada = this.modelos.get(modelId)
+    if (!entrada) return null
     for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
-      if (this.idsRecoloreables[i]?.includes(id)) return regla.color
+      if (entrada.idsRecoloreables[i]?.includes(id)) return regla.color
     }
     return null
   }
@@ -580,42 +855,84 @@ export class Viewer {
    * separado: quien escriba ultimo gana y los demas desaparecen. Se decide
    * aqui, en un unico sitio y con prioridad explicita.
    */
-  private async refrescarAspecto(ids: number[]) {
-    if (!this.model || ids.length === 0) return
+  private async refrescarAspecto(refs: Ref[]) {
+    if (refs.length === 0) return
 
-    await this.model.resetHighlight(ids)
-    for (const id of ids) {
-      if (id === this.sobrevolado) {
-        await this.model.highlight([id], HOVER)
-      } else if (id === this.seleccionado) {
-        await this.model.highlight([id], HIGHLIGHT)
-      } else {
-        const color = this.colorDeTema(id)
-        if (color !== null) {
-          await this.model.setColor([id], new THREE.Color(color))
+    for (const [modelId, ids] of agrupar(refs)) {
+      const entrada = this.modelos.get(modelId)
+      if (!entrada) continue
+      await entrada.model.resetHighlight(ids)
+      for (const id of ids) {
+        const ref = { modelId, localId: id }
+        if (mismaRef(ref, this.sobrevolado)) {
+          await entrada.model.highlight([id], HOVER)
+        } else if (mismaRef(ref, this.seleccionado)) {
+          await entrada.model.highlight([id], HIGHLIGHT)
+        } else {
+          const color = this.colorDeTema(modelId, id)
+          if (color !== null) {
+            await entrada.model.setColor([id], new THREE.Color(color))
+          }
         }
       }
     }
     await this.fragments.core.update(true)
   }
 
-  /** Deja visibles solo los ids indicados. */
-  async isolate(localIds: number[]) {
-    if (!this.model || localIds.length === 0) return
-    await this.model.setVisible(undefined, false)
-    await this.model.setVisible(localIds, true)
+  /**
+   * Deja visibles solo los elementos indicados.
+   *
+   * Con varios modelos montados el aislamiento es global: los modelos que no
+   * aportan ningun elemento se ocultan enteros. Si solo se ocultara dentro del
+   * modelo del elegido, aislar no serviria para nada en cuanto hay mas de uno.
+   */
+  async isolate(refs: Ref[]) {
+    if (refs.length === 0) return
+    const porModelo = agrupar(refs)
+    for (const [modelId, entrada] of this.modelos) {
+      await entrada.model.setVisible(undefined, false)
+      const ids = porModelo.get(modelId)
+      if (ids) await entrada.model.setVisible(ids, true)
+      // Un modelo que no aporta nada al aislamiento queda oculto entero. Se
+      // anota para que la lista de modelos no diga lo contrario que la escena.
+      entrada.visible = !!ids
+    }
     await this.fragments.core.update(true)
   }
 
-  async hide(localIds: number[]) {
-    if (!this.model || localIds.length === 0) return
-    await this.model.setVisible(localIds, false)
+  async hide(refs: Ref[]) {
+    if (refs.length === 0) return
+    for (const [modelId, ids] of agrupar(refs)) {
+      await this.modelos.get(modelId)?.model.setVisible(ids, false)
+    }
     await this.fragments.core.update(true)
   }
 
   async showAll() {
-    if (!this.model) return
-    await this.model.resetVisible()
+    for (const e of this.modelos.values()) {
+      await e.model.resetVisible()
+      e.visible = true
+    }
+    await this.fragments.core.update(true)
+  }
+
+  /**
+   * Muestra u oculta un modelo entero desde la lista de modelos.
+   *
+   * Es lo que hace util montar varios: poder apagar una disciplina para ver
+   * que hay debajo. Un modelo oculto tampoco responde al rayo, o seguiria
+   * seleccionandose a traves de lo que si se ve.
+   */
+  async setModelVisible(modelId: string, visible: boolean) {
+    const entrada = this.modelos.get(modelId)
+    if (!entrada) return
+    entrada.visible = visible
+    if (visible) await entrada.model.resetVisible()
+    else await entrada.model.setVisible(undefined, false)
+    if (!visible) {
+      if (this.seleccionado?.modelId === modelId) this.seleccionado = null
+      if (this.sobrevolado?.modelId === modelId) this.sobrevolado = null
+    }
     await this.fragments.core.update(true)
   }
 
@@ -627,10 +944,12 @@ export class Viewer {
    * elemento translucido sigue tapando a los que tiene detras y el efecto no
    * sirve para lo que se busca, que es ver a traves.
    */
-  async setOpacity(localIds: number[], opacidad: number) {
-    if (!this.model || localIds.length === 0) return
+  async setOpacity(refs: Ref[], opacidad: number) {
+    if (refs.length === 0) return
     const valor = Math.min(1, Math.max(0, opacidad))
-    await this.model.setOpacity(localIds, valor)
+    for (const [modelId, ids] of agrupar(refs)) {
+      await this.modelos.get(modelId)?.model.setOpacity(ids, valor)
+    }
     await this.fragments.core.update(true)
   }
 
@@ -638,23 +957,36 @@ export class Viewer {
    * Deja translucido todo menos lo indicado.
    *
    * Es el uso habitual al revisar un modelo: ver un elemento en su contexto
-   * sin que el resto lo tape. Se limpia la transparencia previa antes de
+   * sin que el resto lo tape. Con varios modelos montados "todo lo demas"
+   * incluye los otros modelos, que es justo lo que se quiere al buscar un
+   * cruce entre disciplinas. Se limpia la transparencia previa antes de
    * aplicar la nueva, o al cambiar de seleccion se irian acumulando capas.
    */
-  async invertOpacity(localIds: number[], opacidad: number) {
-    if (!this.model || localIds.length === 0) return
-    const seleccion = new Set(localIds)
-    const resto = [...this.idsConGeometria].filter((id) => !seleccion.has(id))
-    if (resto.length === 0) return
+  async invertOpacity(refs: Ref[], opacidad: number) {
+    if (refs.length === 0) return
+    const valor = Math.min(1, Math.max(0, opacidad))
+    const elegidos = new Set(refs.map(claveRef))
 
-    await this.model.resetOpacity(undefined)
-    await this.model.setOpacity(resto, Math.min(1, Math.max(0, opacidad)))
+    for (const [modelId, entrada] of this.modelos) {
+      const resto = [...entrada.idsConGeometria].filter(
+        (localId) => !elegidos.has(claveRef({ modelId, localId })),
+      )
+      await entrada.model.resetOpacity(undefined)
+      if (resto.length > 0) await entrada.model.setOpacity(resto, valor)
+    }
     await this.fragments.core.update(true)
   }
 
-  async resetOpacity(localIds?: number[]) {
-    if (!this.model) return
-    await this.model.resetOpacity(localIds)
+  async resetOpacity(refs?: Ref[]) {
+    if (!refs) {
+      for (const e of this.modelos.values()) {
+        await e.model.resetOpacity(undefined)
+      }
+    } else {
+      for (const [modelId, ids] of agrupar(refs)) {
+        await this.modelos.get(modelId)?.model.resetOpacity(ids)
+      }
+    }
     await this.fragments.core.update(true)
   }
 
@@ -667,37 +999,40 @@ export class Viewer {
    * Resuelve una vez, al cargar, que elementos afecta cada regla de color.
    * Consultar los nombres es caro y no cambia mientras el modelo este abierto.
    */
-  private async resolverRecoloreables() {
-    this.idsRecoloreables = COLORES_TEMA_CLARO.map(() => [])
-    if (!this.model || this.idsConGeometria.size === 0) return
+  private async resolverRecoloreables(entrada: Entrada) {
+    entrada.idsRecoloreables = COLORES_TEMA_CLARO.map(() => [])
+    if (entrada.idsConGeometria.size === 0) return
 
-    const ids = [...this.idsConGeometria]
-    const nombres = await this.getNames(ids)
+    const ids = [...entrada.idsConGeometria]
+    const nombres = await this.getNames(entrada.model.modelId, ids)
     for (const id of ids) {
       const nombre = nombres.get(id)
       if (!nombre) continue
       COLORES_TEMA_CLARO.forEach((regla, i) => {
-        if (regla.patron.test(nombre)) this.idsRecoloreables[i].push(id)
+        if (regla.patron.test(nombre)) entrada.idsRecoloreables[i].push(id)
       })
     }
   }
 
   /** Aplica o retira los colores propios del tema claro. */
   private async aplicarColoresDeTema(tema: Tema) {
-    if (!this.model) return
-    for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
-      const ids = this.idsRecoloreables[i]
-      if (!ids || ids.length === 0) continue
-      // Se excluyen el seleccionado y el sobrevolado: su marca manda sobre
-      // el color de tema, y aplicarselo aqui la borraria.
-      const libres = ids.filter(
-        (id) => id !== this.seleccionado && id !== this.sobrevolado,
-      )
-      if (libres.length === 0) continue
-      if (tema === 'claro') {
-        await this.model.setColor(libres, new THREE.Color(regla.color))
-      } else {
-        await this.model.resetColor(libres)
+    for (const [modelId, entrada] of this.modelos) {
+      for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
+        const ids = entrada.idsRecoloreables[i]
+        if (!ids || ids.length === 0) continue
+        // Se excluyen el seleccionado y el sobrevolado: su marca manda sobre
+        // el color de tema, y aplicarselo aqui la borraria.
+        const libres = ids.filter(
+          (localId) =>
+            !mismaRef({ modelId, localId }, this.seleccionado) &&
+            !mismaRef({ modelId, localId }, this.sobrevolado),
+        )
+        if (libres.length === 0) continue
+        if (tema === 'claro') {
+          await entrada.model.setColor(libres, new THREE.Color(regla.color))
+        } else {
+          await entrada.model.resetColor(libres)
+        }
       }
     }
     await this.fragments.core.update(true)
@@ -712,21 +1047,27 @@ export class Viewer {
 
   /** Cuantos elementos afecta cada regla de color. Para diagnostico. */
   getRecoloreables() {
-    return COLORES_TEMA_CLARO.map((r, i) => ({
-      patron: String(r.patron),
-      cuantos: this.idsRecoloreables[i]?.length ?? 0,
-    }))
+    return COLORES_TEMA_CLARO.map((r, i) => {
+      let cuantos = 0
+      for (const e of this.modelos.values()) {
+        cuantos += e.idsRecoloreables[i]?.length ?? 0
+      }
+      return { patron: String(r.patron), cuantos }
+    })
   }
 
   /**
    * Vuelve a la vista general: todo visible, sin transparencias ni resaltados,
-   * y la camara encuadrando el modelo completo.
+   * y la camara encuadrando todo lo montado.
    */
   async resetView() {
-    if (!this.model) return
-    await this.model.resetVisible()
-    await this.model.resetOpacity(undefined)
-    await this.model.resetHighlight()
+    if (!this.hasModel) return
+    for (const e of this.modelos.values()) {
+      await e.model.resetVisible()
+      await e.model.resetOpacity(undefined)
+      await e.model.resetHighlight()
+      e.visible = true
+    }
     this.seleccionado = null
     this.sobrevolado = null
     // resetHighlight sin argumentos tambien se lleva los colores del tema,
@@ -736,11 +1077,22 @@ export class Viewer {
     await this.fitToModel()
   }
 
-  /** Encuadra la camara sobre todo el modelo. */
+  /** Encuadra la camara sobre todo lo montado. */
   async fitToModel() {
-    if (!this.model) return
-    const box = this.model.box
+    const box = this.cajaTotal()
     if (box.isEmpty()) return
+    await this.world.camera.controls.fitToBox(box, true, {
+      paddingLeft: 1,
+      paddingRight: 1,
+      paddingTop: 1,
+      paddingBottom: 1,
+    })
+  }
+
+  /** Encuadra la camara sobre un modelo concreto. */
+  async fitToOneModel(modelId: string) {
+    const box = this.getModelBox(modelId)
+    if (!box) return
     await this.world.camera.controls.fitToBox(box, true, {
       paddingLeft: 1,
       paddingRight: 1,
@@ -757,15 +1109,24 @@ export class Viewer {
    * y basta con que se cuele uno para que la caja combinada salga vacia y el
    * boton no haga nada sin decir por que.
    */
-  async fitToItems(localIds: number[]) {
-    if (!this.model || localIds.length === 0) return
+  async fitToItems(refs: Ref[]) {
+    if (refs.length === 0) return
 
-    const conGeometria = localIds.filter((id) => this.idsConGeometria.has(id))
-    if (conGeometria.length === 0) return
+    const total = new THREE.Box3()
+    total.makeEmpty()
+    for (const [modelId, localIds] of agrupar(refs)) {
+      const entrada = this.modelos.get(modelId)
+      if (!entrada) continue
+      const conGeometria = localIds.filter((id) =>
+        entrada.idsConGeometria.has(id),
+      )
+      if (conGeometria.length === 0) continue
+      const box = await entrada.model.getMergedBox(conGeometria)
+      if (!box.isEmpty()) total.union(box)
+    }
 
-    const box = await this.model.getMergedBox(conGeometria)
-    if (box.isEmpty()) return
-    await this.world.camera.controls.fitToBox(box, true, {
+    if (total.isEmpty()) return
+    await this.world.camera.controls.fitToBox(total, true, {
       paddingLeft: 1,
       paddingRight: 1,
       paddingTop: 1,
@@ -779,7 +1140,15 @@ export class Viewer {
     this.container?.removeEventListener('pointermove', this.handlePointerMove)
     this.container?.removeEventListener('pointerleave', this.handlePointerLeave)
     this.container = null
-    this.model = null
+    this.modelos.clear()
+    this.origenComun = null
     this.components.dispose()
   }
 }
+
+/** Referencia del elemento que toco un rayo. */
+const refDe = (hit: FRAGS.RaycastResult): Ref => ({
+  modelId: hit.fragments.modelId,
+  localId: hit.localId,
+})
+

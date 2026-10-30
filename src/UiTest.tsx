@@ -9,14 +9,15 @@
 
 import { useEffect, useState } from 'react'
 import { exit } from '@tauri-apps/plugin-process'
+import * as THREE from 'three'
 
 import App from './App'
-import type { Viewer } from './viewer/Viewer'
+import { claveRef, type Viewer } from './viewer/Viewer'
 
 declare global {
   interface Window {
     /** Lo expone App solo en modo prueba, para abrir sin pasar por el dialogo. */
-    __pruebaAbrir?: (ruta: string) => Promise<void>
+    __pruebaAbrir?: (ruta: string, anadir?: boolean) => Promise<void>
     /** El visor de la aplicacion, para inspeccionarlo desde la prueba. */
     __pruebaVisor?: () => Viewer | null
   }
@@ -135,7 +136,7 @@ export default function UiTest({ path }: { path: string }) {
           // y desviarse N pixeles, que es el error de un clic humano. La
           // rejilla uniforme no mide esto, porque sus fallos caen lejos de
           // cualquier geometria.
-          const idsP = await visor.getIdsWithGeometry()
+          const idsP = visor.getRefsWithGeometry()
           if (idsP.length > 0) {
             await visor.fitToItems([idsP[0]])
             await esperar(2200)
@@ -156,7 +157,8 @@ export default function UiTest({ path }: { path: string }) {
           // Se acerca al elemento mas compacto de una muestra, no al primero:
           // encuadrar una franja de pavimento de kilometros deja la camara tan
           // lejos que el elemento vuelve a ser una linea y no se puede pulsar.
-          const ids = await visor.getIdsWithGeometry()
+          const ids = visor.getRefsWithGeometry()
+          if (ids.length === 0) throw new Error('el modelo no trajo geometria')
           let masPequeno = ids[0]
           let menorDiagonal = Infinity
           for (const id of ids.slice(0, 120)) {
@@ -167,7 +169,7 @@ export default function UiTest({ path }: { path: string }) {
             const d = cajaId.max.distanceTo(cajaId.min)
             if (d > 0 && d < menorDiagonal) { menorDiagonal = d; masPequeno = id }
           }
-          decir(`elemento mas compacto de la muestra: ${masPequeno} (${menorDiagonal.toFixed(1)} m)`)
+          decir(`elemento mas compacto de la muestra: ${claveRef(masPequeno)} (${menorDiagonal.toFixed(1)} m)`)
           await visor.fitToItems([masPequeno])
           await esperar(2200)
           const acercado = await barrer('acercado a un elemento')
@@ -184,7 +186,7 @@ export default function UiTest({ path }: { path: string }) {
           // algo, tiene que seleccionar lo que hay debajo del cursor. Sin
           // esta comprobacion paso un desfase del ancho del panel lateral.
           {
-            const idsC = await visor.getIdsWithGeometry()
+            const idsC = visor.getRefsWithGeometry()
             let objetivo = idsC[0]
             let menor = Infinity
             for (const id of idsC.slice(0, 120)) {
@@ -212,7 +214,8 @@ export default function UiTest({ path }: { path: string }) {
               // haber otro elemento delante, y resaltar ese es correcto. Se
               // deja como dato, no como fallo.
               decir(
-                `apuntado ${objetivo} en (${punto.x.toFixed(0)}, ${punto.y.toFixed(0)}), resaltado [${marcados.join(', ')}]`,
+                `apuntado ${claveRef(objetivo)} en (${punto.x.toFixed(0)}, ${punto.y.toFixed(0)}),` +
+                `  resaltado [${marcados.map(claveRef).join(', ')}]`,
               )
               check(marcados.length > 0, 'el cursor resalta algo donde hay geometria')
 
@@ -346,6 +349,157 @@ export default function UiTest({ path }: { path: string }) {
                 ' a esa escala los elementos miden menos de un pixel',
             )
           }
+
+          // --- Varios modelos montados a la vez ---
+          //
+          // Lo que se comprueba aqui no es que se vean dos cosas, sino las dos
+          // formas en que esto puede salir mal sin avisar: que el segundo
+          // modelo se apile sobre el primero (parece correcto y esta a dos
+          // kilometros de su sitio), y que la seleccion deje de cuadrar en un
+          // modelo desplazado, porque el rayo ignore su transformacion.
+          const segundaRuta = import.meta.env.VITE_SELFTEST_PATH2 as
+            | string
+            | undefined
+          if (segundaRuta) {
+            decir(`segundo archivo: ${segundaRuta}`)
+            await window.__pruebaAbrir!(segundaRuta, true)
+            const montados = await esperarA(
+              () => visor.getModelos().length === 2,
+              120000,
+            )
+            check(montados, 'se monta un segundo IFC sin quitar el primero',
+              `${visor.getModelos().length} modelos`)
+
+            if (montados) {
+              const [m1, m2] = visor.getModelos()
+              decir(
+                `modelos: ${m1.nombre} (${m1.elementos} elem) + ` +
+                  `${m2.nombre} (${m2.elementos} elem)`,
+              )
+
+              for (const linea of await visor.getCoordsDebug()) decir(linea)
+
+              const off = visor.getOffset(m2.modelId)
+              const sep = off?.length() ?? 0
+              decir(
+                `desplazamiento aplicado al segundo: ` +
+                  `(${off?.x.toFixed(1)}, ${off?.y.toFixed(1)}, ${off?.z.toFixed(1)}) m` +
+                  ` | modulo ${sep.toFixed(1)} m`,
+              )
+
+              // No basta con exigir que el desplazamiento no sea cero: un
+              // "mayor que uno" lo cumple igual de bien un error de tres mil
+              // kilometros, y eso es exactamente lo que paso la primera vez.
+              // Lo que hay que comprobar es que los dos modelos acaben en el
+              // mismo sitio del mundo, no que se hayan movido.
+              const caja1 = visor.getModelBox(m1.modelId)
+              const caja2 = visor.getModelBox(m2.modelId)
+              const c1 = caja1?.getCenter(new THREE.Vector3())
+              const c2 = caja2?.getCenter(new THREE.Vector3())
+              if (c1 && c2 && caja1) {
+                const distancia = c1.distanceTo(c2)
+                const alcance = caja1.getSize(new THREE.Vector3()).length()
+                decir(
+                  `centros: (${c1.x.toFixed(0)}, ${c1.y.toFixed(0)}, ${c1.z.toFixed(0)})` +
+                    ` y (${c2.x.toFixed(0)}, ${c2.y.toFixed(0)}, ${c2.z.toFixed(0)})` +
+                    ` | distancia ${distancia.toFixed(1)} m` +
+                    ` | diagonal del primero ${alcance.toFixed(0)} m`,
+                )
+                check(
+                  distancia < alcance,
+                  'los dos modelos caen en la misma obra, no en dos sitios distintos',
+                  `${distancia.toFixed(1)} m de separacion frente a ${alcance.toFixed(0)} m de modelo`,
+                )
+              }
+              decir(`modulo del desplazamiento: ${sep.toFixed(1)} m`)
+
+              // La regresion que de verdad importa: en un modelo al que se le
+              // ha aplicado una transformacion, el rayo tiene que seguir
+              // cayendo donde apunta el cursor. Si fragments no invirtiera la
+              // matriz del objeto, aqui saldria un desvio enorme.
+              const delSegundo = visor
+                .getRefsWithGeometry()
+                .filter((r) => r.modelId === m2.modelId)
+              if (delSegundo.length > 0) {
+                let objetivo2 = delSegundo[0]
+                let menor2 = Infinity
+                for (const r of delSegundo.slice(0, 120)) {
+                  const [b] = await visor.getItemBoxes([r])
+                  if (!b || b.isEmpty()) continue
+                  const d = b.max.distanceTo(b.min)
+                  if (d > 0 && d < menor2) { menor2 = d; objetivo2 = r }
+                }
+                await visor.fitToItems([objetivo2])
+                await esperar(2200)
+
+                const centro2b = await visor.centroDe(objetivo2)
+                const punto2 = centro2b ? visor.proyectar(centro2b) : null
+                if (punto2) {
+                  const sondas2: number[] = []
+                  for (const [sx, sy] of [
+                    [punto2.x, punto2.y],
+                    [punto2.x + 15, punto2.y],
+                    [punto2.x, punto2.y + 15],
+                  ] as [number, number][]) {
+                    const r = await visor.sondearEn(sx, sy)
+                    if (r?.desvio != null) sondas2.push(r.desvio)
+                  }
+                  if (sondas2.length > 0) {
+                    const peor2 = Math.max(...sondas2)
+                    check(
+                      peor2 < 20,
+                      'en el modelo desplazado el rayo tambien cae donde se apunta',
+                      `desvio maximo ${peor2.toFixed(1)} px en ${sondas2.length} sondas`,
+                    )
+                  } else {
+                    decir('no se pudo sondear el segundo modelo: ningun rayo acerto')
+                  }
+
+                  // Y que lo que se selecciona pertenece al modelo correcto:
+                  // es lo que el identificador compuesto tiene que garantizar.
+                  await visor.highlight(null)
+                  await visor.setHover(null)
+                  await esperar(250)
+                  c.dispatchEvent(new PointerEvent('pointermove', {
+                    clientX: punto2.x, clientY: punto2.y,
+                    bubbles: true, pointerId: 1,
+                  }))
+                  await esperar(700)
+                  const marcados2 = await visor.getHighlighted()
+                  decir(`resaltado sobre el segundo modelo: [${marcados2.map(claveRef).join(', ')}]`)
+                  if (marcados2.length > 0) {
+                    check(
+                      marcados2.every((r) => r.modelId === m2.modelId),
+                      'apuntando al segundo modelo se resalta ese y no el otro',
+                      marcados2.map((r) => r.modelId).join(', '),
+                    )
+                  }
+                }
+              }
+
+              // Ocultar un modelo entero: lo que hace util montar varios.
+              await visor.setModelVisible(m2.modelId, false)
+              await esperar(600)
+              const trasOcultar = await visor.sondearEn(
+                caja.left + caja.width / 2,
+                caja.top + caja.height / 2,
+              )
+              decir(
+                `tras ocultar el segundo modelo, el rayo al centro toca: ` +
+                  `${trasOcultar ? claveRef(trasOcultar.ref) : 'nada'}`,
+              )
+              check(
+                !trasOcultar || trasOcultar.ref.modelId !== m2.modelId,
+                'un modelo oculto deja de responder al raton',
+              )
+              await visor.setModelVisible(m2.modelId, true)
+              await esperar(400)
+            }
+          } else {
+            decir(
+              'NOTA: sin VITE_SELFTEST_PATH2 no se comprueba el montaje de varios IFC',
+            )
+          }
         }
 
         // --- Recoloreado por tema ---
@@ -353,9 +507,19 @@ export default function UiTest({ path }: { path: string }) {
         if (v2) {
           // Diagnostico: que nombres y categorias tienen de verdad los
           // elementos con geometria, que es sobre los que actua la regla.
-          const idsG = await v2.getIdsWithGeometry()
-          const nombresG = await v2.getNames(idsG)
-          const conNombre = idsG.filter((i) => nombresG.has(i)).length
+          const idsG = v2.getRefsWithGeometry()
+          // Los nombres se piden por modelo y se guardan con la clave
+          // compuesta: con varios IFC montados los localId se repiten.
+          const nombresG = new Map<string, string>()
+          for (const m of v2.getModelos()) {
+            const soloDeEse = idsG
+              .filter((r) => r.modelId === m.modelId)
+              .map((r) => r.localId)
+            for (const [localId, n] of await v2.getNames(m.modelId, soloDeEse)) {
+              nombresG.set(claveRef({ modelId: m.modelId, localId }), n)
+            }
+          }
+          const conNombre = idsG.filter((r) => nombresG.has(claveRef(r))).length
           const ejemplos = [...nombresG.entries()].slice(0, 8).map(([i, n]) => `${i}:"${n}"`)
           decir(`elementos con geometria: ${idsG.length}, con nombre: ${conNombre}`)
           decir(`ejemplos de nombre: ${ejemplos.join('  ')}`)
@@ -374,7 +538,7 @@ export default function UiTest({ path }: { path: string }) {
             decir('el modelo no tiene elementos de firme; la regla de color no aplica')
           }
 
-          const muestra = (await v2.getIdsWithGeometry()).slice(0, 400)
+          const muestra = (v2.getRefsWithGeometry()).slice(0, 400)
           v2.setTheme('claro')
           await esperar(1200)
           const claros = await v2.getColors(muestra)
@@ -397,7 +561,7 @@ export default function UiTest({ path }: { path: string }) {
           const marcadosTrasColor = (await v2.getHighlighted()).length
           decir(`elementos en el canal de resaltado tras recolorear: ${marcadosTrasColor}`)
 
-          const idsSel = await v2.getIdsWithGeometry()
+          const idsSel = v2.getRefsWithGeometry()
           await v2.highlight(idsSel[0])
           await esperar(600)
           const marcadosTrasSeleccion = (await v2.getHighlighted()).length

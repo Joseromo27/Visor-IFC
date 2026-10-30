@@ -151,12 +151,10 @@ export class Viewer {
     void (async () => {
       try {
         const dom = this.world.renderer!.three.domElement
-        const rect = dom.getBoundingClientRect()
-        const mouse = new THREE.Vector2(
-          e.clientX - rect.left,
-          e.clientY - rect.top,
+        const hit = await this.buscarBajoCursor(
+          new THREE.Vector2(e.clientX, e.clientY),
+          dom,
         )
-        const hit = await this.buscarBajoCursor(mouse, dom)
         await this.setHover(hit?.localId ?? null)
       } finally {
         this.hoverEnCurso = false
@@ -199,6 +197,10 @@ export class Viewer {
     mouse: THREE.Vector2,
     dom: HTMLCanvasElement,
   ): Promise<FRAGS.RaycastResult | null> {
+    // `mouse` va en coordenadas de ventana (clientX/clientY), sin restarle la
+    // posicion del lienzo: fragments ya le resta su getBoundingClientRect por
+    // dentro. Restarsela aqui tambien desplazaba el punto probado el ancho del
+    // panel lateral, y habia que apuntar a la derecha del objeto para tocarlo.
     if (!this.model) return null
     const camera = this.world.camera.three
     const tirar = (x: number, y: number) =>
@@ -232,8 +234,7 @@ export class Viewer {
     if (!this.container || !this.model) return
 
     const dom = this.world.renderer!.three.domElement
-    const rect = dom.getBoundingClientRect()
-    const mouse = new THREE.Vector2(e.clientX - rect.left, e.clientY - rect.top)
+    const mouse = new THREE.Vector2(e.clientX, e.clientY)
 
     const hit = await this.buscarBajoCursor(mouse, dom)
 
@@ -383,6 +384,27 @@ export class Viewer {
     }
 
     return names
+  }
+
+  /**
+   * Lanza un rayo en coordenadas de ventana y devuelve donde cayo.
+   *
+   * Sirve para comprobar la correspondencia sin depender de que elemento se
+   * toque: el punto 3D del impacto, reproyectado a pantalla, tiene que caer
+   * donde se apunto. Si no coincide, las coordenadas estan desalineadas.
+   */
+  async sondearEn(x: number, y: number) {
+    if (!this.model) return null
+    const dom = this.world.renderer!.three.domElement
+    const hit = await this.buscarBajoCursor(new THREE.Vector2(x, y), dom)
+    if (!hit) return null
+    const vuelta = this.proyectar(hit.point)
+    return {
+      localId: hit.localId,
+      pedido: { x, y },
+      reproyectado: vuelta,
+      desvio: vuelta ? Math.hypot(vuelta.x - x, vuelta.y - y) : null,
+    }
   }
 
   /** Proyecta un punto del mundo a coordenadas del lienzo. Para diagnostico. */

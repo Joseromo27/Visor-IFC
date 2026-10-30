@@ -178,6 +178,88 @@ export default function UiTest({ path }: { path: string }) {
             `${acercado} aciertos de 49`,
           )
 
+          // --- Correspondencia entre lo que se ve y lo que responde ---
+          //
+          // Es el invariante que faltaba: no basta con que pulsar seleccione
+          // algo, tiene que seleccionar lo que hay debajo del cursor. Sin
+          // esta comprobacion paso un desfase del ancho del panel lateral.
+          {
+            const idsC = await visor.getIdsWithGeometry()
+            let objetivo = idsC[0]
+            let menor = Infinity
+            for (const id of idsC.slice(0, 120)) {
+              const [b] = await visor.getItemBoxes([id])
+              if (!b || b.isEmpty()) continue
+              const d = b.max.distanceTo(b.min)
+              if (d > 0 && d < menor) { menor = d; objetivo = id }
+            }
+            await visor.fitToItems([objetivo])
+            await esperar(2200)
+
+            const centroObj = await visor.centroDe(objetivo)
+            const punto = centroObj ? visor.proyectar(centroObj) : null
+            if (punto) {
+              await visor.highlight(null)
+              await visor.setHover(null)
+              await esperar(250)
+
+              c.dispatchEvent(new PointerEvent('pointermove', {
+                clientX: punto.x, clientY: punto.y, bubbles: true, pointerId: 1,
+              }))
+              await esperar(700)
+              const marcados = await visor.getHighlighted()
+              // Que resalte justo el objetivo no esta garantizado: puede
+              // haber otro elemento delante, y resaltar ese es correcto. Se
+              // deja como dato, no como fallo.
+              decir(
+                `apuntado ${objetivo} en (${punto.x.toFixed(0)}, ${punto.y.toFixed(0)}), resaltado [${marcados.join(', ')}]`,
+              )
+              check(marcados.length > 0, 'el cursor resalta algo donde hay geometria')
+
+              // El invariante solido: el punto 3D del impacto, reproyectado a
+              // pantalla, debe caer donde se apunto. No depende de que
+              // elemento se toque, solo de que las coordenadas cuadren.
+              const sondas: number[] = []
+              for (const [sx, sy] of [
+                [punto.x, punto.y],
+                [punto.x + 15, punto.y],
+                [punto.x, punto.y + 15],
+              ] as [number, number][]) {
+                const r = await visor.sondearEn(sx, sy)
+                if (r?.desvio != null) sondas.push(r.desvio)
+              }
+              if (sondas.length > 0) {
+                const peor = Math.max(...sondas)
+                check(
+                  peor < 20,
+                  'el impacto del rayo cae donde apunta el cursor',
+                  `desvio maximo ${peor.toFixed(1)} px en ${sondas.length} sondas`,
+                )
+              } else {
+                decir('no se pudo sondear: ningun rayo acerto')
+              }
+
+              // Medir el desfase: a que distancia horizontal del punto real
+              // hay que apuntar para que responda.
+              let desfase: number | null = null
+              for (const dx of [0, 40, 80, 120, 160, 200, 240, 280, 320, 360, -40, -80]) {
+                await visor.setHover(null)
+                await esperar(140)
+                c.dispatchEvent(new PointerEvent('pointermove', {
+                  clientX: punto.x + dx, clientY: punto.y, bubbles: true, pointerId: 1,
+                }))
+                await esperar(220)
+                if ((await visor.getHighlighted()).length > 0) { desfase = dx; break }
+              }
+              decir(`desfase horizontal necesario para acertar: ${desfase === null ? 'no se encontro' : desfase + ' px'}`)
+              check(
+                desfase === 0,
+                'no hace falta desplazar el cursor para acertar',
+                `${desfase} px`,
+              )
+            }
+          }
+
           // Coste del seguimiento del cursor: el caso malo es moverlo sobre
           // zona vacia, donde se agota la escalera de anillos sin encontrar
           // nada. Si eso fuera caro, mover el raton pondria la app a arrastrar.

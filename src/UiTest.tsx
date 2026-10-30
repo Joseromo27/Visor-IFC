@@ -178,6 +178,69 @@ export default function UiTest({ path }: { path: string }) {
             `${acercado} aciertos de 49`,
           )
 
+          // Coste del seguimiento del cursor: el caso malo es moverlo sobre
+          // zona vacia, donde se agota la escalera de anillos sin encontrar
+          // nada. Si eso fuera caro, mover el raton pondria la app a arrastrar.
+          {
+            const t0 = performance.now()
+            const vueltas = 12
+            for (let k = 0; k < vueltas; k++) {
+              c.dispatchEvent(new PointerEvent('pointermove', {
+                clientX: caja.left + 3 + k, clientY: caja.top + 3,
+                bubbles: true, pointerId: 1,
+              }))
+              await esperar(110)
+            }
+            const porConsulta = (performance.now() - t0) / vueltas - 110
+            decir(`coste del seguimiento sobre zona vacia: ~${porConsulta.toFixed(0)} ms por consulta`)
+          }
+
+          // --- Resalte al pasar el cursor ---
+          // Buscar un punto que acierte y comprobar que el solo hecho de
+          // pasar por encima ya marca el elemento, sin pulsar.
+          let puntoBueno: { x: number; y: number } | null = null
+          for (let i = 1; i <= 7 && !puntoBueno; i++) {
+            for (let j = 1; j <= 7 && !puntoBueno; j++) {
+              const px = caja.left + (caja.width * i) / 8
+              const py = caja.top + (caja.height * j) / 8
+              if (await pulsar(px, py)) puntoBueno = { x: px, y: py }
+            }
+          }
+          if (puntoBueno) {
+            await visor.highlight(null)
+            await visor.setHover(null)
+            await esperar(300)
+            const antesDeSobrevolar = (await visor.getHighlighted()).length
+
+            c.dispatchEvent(new PointerEvent('pointermove', {
+              clientX: puntoBueno.x, clientY: puntoBueno.y,
+              bubbles: true, pointerId: 1,
+            }))
+            await esperar(700)
+            const sobrevolando = (await visor.getHighlighted()).length
+
+            check(
+              sobrevolando > antesDeSobrevolar,
+              'pasar el cursor por encima resalta el elemento',
+              `${antesDeSobrevolar} -> ${sobrevolando} marcados`,
+            )
+
+            // Al sacar el cursor del visor el resalte debe apagarse. Se usa
+            // pointerleave y no un movimiento a una esquina: una esquina puede
+            // tener geometria y entonces el resalte solo cambia de elemento,
+            // que es correcto pero no es lo que se quiere comprobar aqui.
+            c.dispatchEvent(new PointerEvent('pointerleave', {
+              bubbles: true, pointerId: 1,
+            }))
+            await esperar(700)
+            const fuera = (await visor.getHighlighted()).length
+            check(
+              fuera <= antesDeSobrevolar,
+              'al sacar el cursor del visor se apaga el resalte',
+              `${sobrevolando} -> ${fuera} marcados`,
+            )
+          }
+
           // Y lo que de verdad importa: que al acertar, la interfaz responda.
           if (acercado > 0) {
             let encontrado = false

@@ -44,6 +44,19 @@ const HIGHLIGHT: FRAGS.MaterialDefinition = {
   transparent: false,
 }
 
+/** Resalte al pasar el cursor. Distinto del de seleccion a proposito: hay que
+ *  poder ver a la vez que hay seleccionado y que se seleccionaria al pulsar. */
+const HOVER: FRAGS.MaterialDefinition = {
+  color: new THREE.Color(0x8fd0ff),
+  renderedFaces: FRAGS.RenderedFaces.TWO,
+  opacity: 1,
+  transparent: false,
+}
+
+/** Radios en pixeles que se prueban alrededor del cursor si el punto exacto
+ *  no toca nada. Sin esto hay que acercarse mucho para poder pulsar algo. */
+const RADIOS_TOLERANCIA = [5, 11, 18]
+
 type World = OBC.SimpleWorld<
   OBC.SimpleScene,
   OBC.OrthoPerspectiveCamera,
@@ -61,8 +74,9 @@ export class Viewer {
   /** Ids afectados por cada regla de color, resueltos al cargar. */
   private idsRecoloreables: number[][] = []
   private temaActual: Tema = 'oscuro'
-  /** Lo que hay resaltado ahora, para poder quitarlo sin borrar mas. */
-  private resaltados: number[] = []
+  /** Elemento seleccionado y elemento bajo el cursor. */
+  private seleccionado: number | null = null
+  private sobrevolado: number | null = null
 
   /** Se dispara al hacer clic en el modelo. `null` al hacer clic en vacio. */
   onSelect: ((localId: number | null) => void) | null = null
@@ -107,11 +121,52 @@ export class Viewer {
 
     container.addEventListener('pointerdown', this.handlePointerDown)
     container.addEventListener('pointerup', this.handlePointerUp)
+    container.addEventListener('pointermove', this.handlePointerMove)
+    container.addEventListener('pointerleave', this.handlePointerLeave)
   }
 
   // Un clic solo cuenta como seleccion si el puntero apenas se movio; de lo
   // contrario, orbitar la camara seleccionaria elementos sin querer.
   private downAt: { x: number; y: number } | null = null
+
+  // El seguimiento del cursor se limita en el tiempo y no se solapa consigo
+  // mismo: cada consulta puede costar varios rayos y el raton emite decenas de
+  // eventos por segundo. Tampoco se busca mientras la camara se mueve, que es
+  // cuando el resultado ya no vale al llegar.
+  private ultimoHover = 0
+  private hoverEnCurso = false
+
+  private handlePointerMove = (e: PointerEvent) => {
+    // Basta con no consultar mientras hay un boton pulsado: orbitar y
+    // desplazar requieren mantenerlo, y durante el arrastre el resultado no
+    // interesa. No se usa `controls.active`, que con el amortiguado de la
+    // libreria se queda practicamente siempre en cierto y lo bloqueaba todo.
+    if (!this.model || this.downAt) return
+
+    const ahora = performance.now()
+    if (ahora - this.ultimoHover < 90 || this.hoverEnCurso) return
+    this.ultimoHover = ahora
+    this.hoverEnCurso = true
+
+    void (async () => {
+      try {
+        const dom = this.world.renderer!.three.domElement
+        const rect = dom.getBoundingClientRect()
+        const mouse = new THREE.Vector2(
+          e.clientX - rect.left,
+          e.clientY - rect.top,
+        )
+        const hit = await this.buscarBajoCursor(mouse, dom)
+        await this.setHover(hit?.localId ?? null)
+      } finally {
+        this.hoverEnCurso = false
+      }
+    })()
+  }
+
+  private handlePointerLeave = () => {
+    void this.setHover(null)
+  }
 
   private handlePointerDown = (e: PointerEvent) => {
     this.downAt = { x: e.clientX, y: e.clientY }
@@ -128,6 +183,51 @@ export class Viewer {
     void this.pick(e)
   }
 
+  /**
+   * Busca elemento bajo un punto de pantalla, ensanchando la busqueda.
+   *
+   * El rayo exacto exige acertar al pixel y en obra lineal los elementos son
+   * muy finos en pantalla: medido sobre el modelo de canales, hacia falta
+   * acercarse mucho para poder pulsar algo. Si el punto exacto falla se
+   * prueban anillos crecientes y se queda el impacto mas cercano a la camara,
+   * que es el que esta visualmente encima.
+   *
+   * Lo usan tanto el cursor como el clic, a proposito: lo que se resalta al
+   * pasar por encima tiene que ser exactamente lo que se seleccionaria.
+   */
+  private async buscarBajoCursor(
+    mouse: THREE.Vector2,
+    dom: HTMLCanvasElement,
+  ): Promise<FRAGS.RaycastResult | null> {
+    if (!this.model) return null
+    const camera = this.world.camera.three
+    const tirar = (x: number, y: number) =>
+      this.model!.raycast({ camera, mouse: new THREE.Vector2(x, y), dom })
+
+    const exacto = await tirar(mouse.x, mouse.y)
+    if (exacto) return exacto
+
+    const angulos = [0, 45, 90, 135, 180, 225, 270, 315]
+    for (const radio of RADIOS_TOLERANCIA) {
+      const impactos = (
+        await Promise.all(
+          angulos.map((g) => {
+            const rad = (g * Math.PI) / 180
+            return tirar(
+              mouse.x + Math.cos(rad) * radio,
+              mouse.y + Math.sin(rad) * radio,
+            )
+          }),
+        )
+      ).filter((r): r is FRAGS.RaycastResult => !!r)
+
+      if (impactos.length > 0) {
+        return impactos.reduce((a, b) => (a.distance <= b.distance ? a : b))
+      }
+    }
+    return null
+  }
+
   private async pick(e: PointerEvent) {
     if (!this.container || !this.model) return
 
@@ -135,11 +235,7 @@ export class Viewer {
     const rect = dom.getBoundingClientRect()
     const mouse = new THREE.Vector2(e.clientX - rect.left, e.clientY - rect.top)
 
-    const hit = await this.model.raycast({
-      camera: this.world.camera.three,
-      mouse,
-      dom,
-    })
+    const hit = await this.buscarBajoCursor(mouse, dom)
 
     // El punto exacto del clic pasa a ser el centro de giro y de zoom, sin
     // mover la camara. En un modelo de kilometros es la diferencia entre
@@ -427,32 +523,58 @@ export class Viewer {
    * devuelve su color de tema si le correspondia.
    */
   async highlight(localId: number | null) {
-    if (!this.model) return
-
-    if (this.resaltados.length > 0) {
-      await this.model.resetHighlight(this.resaltados)
-      await this.reaplicarColorDeTema(this.resaltados)
-    }
-
-    this.resaltados = localId !== null ? [localId] : []
-    if (localId !== null) {
-      await this.model.highlight([localId], HIGHLIGHT)
-    }
-    await this.fragments.core.update(true)
+    if (this.seleccionado === localId) return
+    const afectados = [this.seleccionado, localId].filter(
+      (x): x is number => x !== null,
+    )
+    this.seleccionado = localId
+    await this.refrescarAspecto(afectados)
   }
 
-  /** Devuelve el color de tema a los ids indicados que lo tuvieran. */
-  private async reaplicarColorDeTema(ids: number[]) {
-    if (!this.model || this.temaActual !== 'claro' || ids.length === 0) return
-    const afectados = new Set(ids)
+  /** Marca el elemento bajo el cursor. `null` cuando no hay ninguno. */
+  async setHover(localId: number | null) {
+    if (this.sobrevolado === localId) return
+    const afectados = [this.sobrevolado, localId].filter(
+      (x): x is number => x !== null,
+    )
+    this.sobrevolado = localId
+    await this.refrescarAspecto(afectados)
+  }
+
+  /** Color de tema que le toca a un elemento, si le toca alguno. */
+  private colorDeTema(id: number): number | null {
+    if (this.temaActual !== 'claro') return null
     for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
-      const suyos = (this.idsRecoloreables[i] ?? []).filter((id) =>
-        afectados.has(id),
-      )
-      if (suyos.length > 0) {
-        await this.model.setColor(suyos, new THREE.Color(regla.color))
+      if (this.idsRecoloreables[i]?.includes(id)) return regla.color
+    }
+    return null
+  }
+
+  /**
+   * Repinta unos pocos elementos segun el estado en que esten.
+   *
+   * El resaltado, la marca del cursor y los colores del tema se aplican por el
+   * mismo canal interno de fragments, asi que no pueden gestionarse por
+   * separado: quien escriba ultimo gana y los demas desaparecen. Se decide
+   * aqui, en un unico sitio y con prioridad explicita.
+   */
+  private async refrescarAspecto(ids: number[]) {
+    if (!this.model || ids.length === 0) return
+
+    await this.model.resetHighlight(ids)
+    for (const id of ids) {
+      if (id === this.sobrevolado) {
+        await this.model.highlight([id], HOVER)
+      } else if (id === this.seleccionado) {
+        await this.model.highlight([id], HIGHLIGHT)
+      } else {
+        const color = this.colorDeTema(id)
+        if (color !== null) {
+          await this.model.setColor([id], new THREE.Color(color))
+        }
       }
     }
+    await this.fragments.core.update(true)
   }
 
   /** Deja visibles solo los ids indicados. */
@@ -544,10 +666,16 @@ export class Viewer {
     for (const [i, regla] of COLORES_TEMA_CLARO.entries()) {
       const ids = this.idsRecoloreables[i]
       if (!ids || ids.length === 0) continue
+      // Se excluyen el seleccionado y el sobrevolado: su marca manda sobre
+      // el color de tema, y aplicarselo aqui la borraria.
+      const libres = ids.filter(
+        (id) => id !== this.seleccionado && id !== this.sobrevolado,
+      )
+      if (libres.length === 0) continue
       if (tema === 'claro') {
-        await this.model.setColor(ids, new THREE.Color(regla.color))
+        await this.model.setColor(libres, new THREE.Color(regla.color))
       } else {
-        await this.model.resetColor(ids)
+        await this.model.resetColor(libres)
       }
     }
     await this.fragments.core.update(true)
@@ -577,7 +705,8 @@ export class Viewer {
     await this.model.resetVisible()
     await this.model.resetOpacity(undefined)
     await this.model.resetHighlight()
-    this.resaltados = []
+    this.seleccionado = null
+    this.sobrevolado = null
     // resetHighlight sin argumentos tambien se lleva los colores del tema,
     // porque comparten canal; hay que reponerlos.
     await this.aplicarColoresDeTema(this.temaActual)
@@ -625,6 +754,8 @@ export class Viewer {
   dispose() {
     this.container?.removeEventListener('pointerdown', this.handlePointerDown)
     this.container?.removeEventListener('pointerup', this.handlePointerUp)
+    this.container?.removeEventListener('pointermove', this.handlePointerMove)
+    this.container?.removeEventListener('pointerleave', this.handlePointerLeave)
     this.container = null
     this.model = null
     this.components.dispose()

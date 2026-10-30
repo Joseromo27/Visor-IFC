@@ -99,6 +99,25 @@ el rayo y las cajas, asi que la seleccion sigue cayendo donde se ve el elemento.
 Como los `localId` solo son unicos dentro de su archivo, desde aqui todo el
 visor identifica un elemento con `Ref = { modelId, localId }`.
 
+## Cerrar y volver a abrir
+
+"Cerrar todo" quita los modelos montados y deja el visor vacio. Abrir otro
+archivo a continuacion dejaba la aplicacion muerta: la ventana seguia viva — se
+podia mover, e incluso cambiar el tema desde "Opciones" — pero el resto de la
+barra quedaba apagada, porque sus botones se desactivan mientras hay una carga
+en curso y esa carga no terminaba nunca.
+
+La espera forzada de fragments (`update(true)`) se resuelve cuando el worker
+devuelve un aviso de fin sellado con un numero de secuencia igual o mayor al de
+la ultima peticion enviada. Al quitar el ultimo modelo, la libreria le pide al
+worker que lo borre y **acto seguido termina el worker**, asi que ese aviso no
+llega jamas. No hay sintoma intermedio: la promesa simplemente no se resuelve.
+
+Toda actualizacion pasa ahora por `Viewer.actualizar`, que no llama a la
+libreria cuando no queda ningun modelo montado — sin modelos no hay nada que
+actualizar — y que ademas limita la espera: una actualizacion que no vuelve
+podra retrasar lo que se ve, pero no dejar la aplicacion inservible.
+
 ## Rendimiento medido
 
 Medido en un i7-11800H con 15,6 GB de RAM, sobre un IFC4X3 de **741,6 MB** de
@@ -193,6 +212,12 @@ comprobacion exigia solo que el desplazamiento no fuese cero, cosa que cumple
 igual de bien un error de miles de kilometros; ahora exige que la distancia
 entre centros quepa dentro de la diagonal del modelo mayor, que es lo que acabo
 delatando el problema de la georreferencia.
+
+La prueba de interfaz cierra y vuelve a abrir el archivo pulsando los botones
+de verdad, porque el cuelgue de "Cerrar todo" no se veia de otra forma: el
+visor hacia su trabajo, y lo que quedaba atascado era la espera posterior. Mide
+aparte que descargar y actualizar vuelvan con el visor vacio, ya que desde
+fuera el sintoma — la barra entera apagada — no dice en que llamada se quedo.
 
 La referencia independiente con la que se contrasto todo esto sale de los
 propios IFC, sin pasar por la libreria: sumando el origen del `IfcSite` a los

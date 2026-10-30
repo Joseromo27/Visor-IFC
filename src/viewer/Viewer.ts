@@ -80,6 +80,11 @@ const HOVER: FRAGS.MaterialDefinition = {
  *  no toca nada. Sin esto hay que acercarse mucho para poder pulsar algo. */
 const RADIOS_TOLERANCIA = [5, 11, 18]
 
+/** Tope de espera para una actualizacion de fragments. Holgado a proposito:
+ *  en un modelo de cientos de MB una actualizacion legitima puede tardar
+ *  segundos, y pasarse de listo aqui solo adelantaria trabajo a medias. */
+const LIMITE_ACTUALIZACION = 20000
+
 type World = OBC.SimpleWorld<
   OBC.SimpleScene,
   OBC.OrthoPerspectiveCamera,
@@ -187,13 +192,13 @@ export class Viewer {
     // Fragments decide que geometria subir a la GPU segun la camara, asi que
     // hay que reevaluar cada vez que la camara se detiene.
     this.world.camera.controls.addEventListener('rest', () => {
-      void this.fragments.core.update(true)
+      void this.actualizar()
     })
 
     this.fragments.list.onItemSet.add(({ value: model }) => {
       model.useCamera(this.world.camera.three)
       this.world.scene.three.add(model.object)
-      void this.fragments.core.update(true)
+      void this.actualizar()
     })
 
     container.addEventListener('pointerdown', this.handlePointerDown)
@@ -401,7 +406,7 @@ export class Viewer {
     await this.resolverRecoloreables(entrada)
     this.adjustCameraPlanes()
     await this.aplicarColoresDeTema(this.temaActual)
-    await this.fragments.core.update(true)
+    await this.actualizar()
     if (opciones.encuadrar !== false) await this.fitToModel()
 
     return {
@@ -482,13 +487,47 @@ export class Viewer {
   }
 
   /**
+   * Pide a fragments que aplique el trabajo pendiente. **Ningun sitio llama a
+   * `core.update` directamente**, por dos razones.
+   *
+   * La primera es un cuelgue real: la espera forzada de la libreria se
+   * resuelve cuando el worker devuelve un aviso de fin sellado con un numero
+   * de secuencia igual o mayor al de la ultima peticion enviada. Al quitar el
+   * ultimo modelo, la libreria le pide al worker que lo borre y acto seguido
+   * **termina el worker**, asi que ese aviso no llega jamas y la espera queda
+   * pendiente para siempre. Sin modelos montados tampoco hay nada que
+   * actualizar, de modo que la llamada se omite.
+   *
+   * La segunda es que una actualizacion que no vuelve no puede dejar la
+   * aplicacion inservible: aunque quede algun modelo, la espera lleva limite.
+   * Pasado el limite se sigue adelante; el trabajo del worker continua por su
+   * cuenta y, como mucho, la escena tarda un instante mas en reflejarlo.
+   */
+  private async actualizar() {
+    if (this.modelos.size === 0) return
+    let aTiempo = false
+    await Promise.race([
+      this.fragments.core.update(true).then(() => {
+        aTiempo = true
+      }),
+      new Promise<void>((listo) => setTimeout(listo, LIMITE_ACTUALIZACION)),
+    ])
+    if (!aTiempo) {
+      console.warn(
+        `La actualizacion de fragments no termino en ${LIMITE_ACTUALIZACION} ms;` +
+          ' se continua sin esperarla.',
+      )
+    }
+  }
+
+  /**
    * Fuerza la reevaluacion de que geometria sube a la GPU. Es lo que dispara
    * el evento `rest` de la camara al terminar un encuadre, pero alli va sin
    * esperar: si tarda, la ventana se queda sin responder y no hay forma de
    * atribuirlo. Expuesto para poder medirlo.
    */
   async forceUpdate() {
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /** Posicion y distancia al objetivo de la camara. Para diagnostico. */
@@ -521,7 +560,7 @@ export class Viewer {
     // conserva, o los que siguen montados saltarian de sitio.
     if (this.modelos.size === 0) this.origenComun = null
     this.adjustCameraPlanes()
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /** Quita todos los modelos. */
@@ -533,7 +572,7 @@ export class Viewer {
     this.seleccionado = null
     this.sobrevolado = null
     this.origenComun = null
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /** Arboles espaciales, uno por modelo montado. */
@@ -876,7 +915,7 @@ export class Viewer {
         }
       }
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /**
@@ -897,7 +936,7 @@ export class Viewer {
       // anota para que la lista de modelos no diga lo contrario que la escena.
       entrada.visible = !!ids
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   async hide(refs: Ref[]) {
@@ -905,7 +944,7 @@ export class Viewer {
     for (const [modelId, ids] of agrupar(refs)) {
       await this.modelos.get(modelId)?.model.setVisible(ids, false)
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   async showAll() {
@@ -913,7 +952,7 @@ export class Viewer {
       await e.model.resetVisible()
       e.visible = true
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /**
@@ -933,7 +972,7 @@ export class Viewer {
       if (this.seleccionado?.modelId === modelId) this.seleccionado = null
       if (this.sobrevolado?.modelId === modelId) this.sobrevolado = null
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /**
@@ -950,7 +989,7 @@ export class Viewer {
     for (const [modelId, ids] of agrupar(refs)) {
       await this.modelos.get(modelId)?.model.setOpacity(ids, valor)
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /**
@@ -974,7 +1013,7 @@ export class Viewer {
       await entrada.model.resetOpacity(undefined)
       if (resto.length > 0) await entrada.model.setOpacity(resto, valor)
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   async resetOpacity(refs?: Ref[]) {
@@ -987,7 +1026,7 @@ export class Viewer {
         await this.modelos.get(modelId)?.model.resetOpacity(ids)
       }
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /** Modo de navegacion de la camara. */
@@ -1035,7 +1074,7 @@ export class Viewer {
         }
       }
     }
-    await this.fragments.core.update(true)
+    await this.actualizar()
   }
 
   /** Cambia el fondo de la escena y los colores que dependen del tema. */
@@ -1073,7 +1112,7 @@ export class Viewer {
     // resetHighlight sin argumentos tambien se lleva los colores del tema,
     // porque comparten canal; hay que reponerlos.
     await this.aplicarColoresDeTema(this.temaActual)
-    await this.fragments.core.update(true)
+    await this.actualizar()
     await this.fitToModel()
   }
 

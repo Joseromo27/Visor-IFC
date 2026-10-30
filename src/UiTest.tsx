@@ -76,6 +76,69 @@ export default function UiTest({ path }: { path: string }) {
           `${filasArbol()} filas visibles`,
         )
 
+        // --- Cerrar todo y volver a abrir ---
+        //
+        // Ciclo que en la 0.3.0 dejaba la aplicacion muerta: la ventana seguia
+        // viva, pero con todos los botones apagados menos "Opciones". Se hace
+        // por los botones de verdad, porque el fallo estaba en que la espera
+        // del visor no volvia nunca y la barra se quedaba en "ocupado"; y con
+        // limite de tiempo, para que un cuelgue salga como falla en vez de
+        // colgar tambien la prueba.
+        const boton = (texto: string) =>
+          [...document.querySelectorAll<HTMLButtonElement>('.toolbar button')]
+            .find((b) => b.textContent?.trim().startsWith(texto)) ?? null
+
+        const cerrar = boton('Cerrar todo')
+        check(!!cerrar && !cerrar.disabled, 'el boton de cerrar todo responde')
+        cerrar?.click()
+        check(
+          await esperarA(() => filasArbol() === 0, 20000),
+          'cerrar todo vacia el arbol',
+          `${filasArbol()} filas`,
+        )
+        check(
+          await esperarA(() => boton('Abrir IFC')?.disabled === false, 20000),
+          'tras cerrar todo la barra vuelve a estar disponible',
+          boton('Abrir IFC')?.disabled ? 'los botones siguen apagados' : '',
+        )
+
+        // Sin modelos montados, descargar y actualizar tienen que volver en
+        // el acto. Aqui estaba el fallo: la espera de la libreria aguardaba un
+        // aviso de un worker que ella misma acababa de terminar, y no volvia
+        // nunca. Se mide por separado porque desde la interfaz el sintoma
+        // (toda la barra apagada) no dice en que llamada se quedo.
+        const enPlazo = async (etiqueta: string, fn: () => Promise<unknown>) => {
+          const ok = await Promise.race([
+            fn().then(
+              () => true,
+              (e) => {
+                decir(`${etiqueta} lanzo :: ${e}`)
+                return true
+              },
+            ),
+            esperar(25000).then(() => false),
+          ])
+          check(ok, `${etiqueta} vuelve con el visor vacio`, ok ? '' : 'sigue esperando a los 25 s')
+        }
+        const vacio = window.__pruebaVisor!()!
+        await enPlazo('descargar todo', () => vacio.disposeAll())
+        await enPlazo('actualizar', () => vacio.forceUpdate())
+
+        const reabrio = await Promise.race([
+          window.__pruebaAbrir!(path).then(() => true),
+          esperar(120000).then(() => false),
+        ])
+        check(reabrio, 'volver a abrir despues de cerrar todo termina')
+        check(
+          await esperarA(() => filasArbol() > 0, 20000),
+          'el arbol se vuelve a poblar',
+          `${filasArbol()} filas`,
+        )
+        check(
+          await esperarA(() => boton('Aislar') !== null && boton('Abrir IFC')?.disabled === false, 20000),
+          'la barra sigue utilizable despues del ciclo',
+        )
+
         // --- El clic, tal como lo hace una persona ---
         const c = lienzo()!
         const caja = c.getBoundingClientRect()

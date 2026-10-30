@@ -272,18 +272,32 @@ export default function App() {
     if (path) await openPath(path, true)
   }, [openPath])
 
+  // Cerrar tambien toma el guardia de ocupado: sin el, pulsar "Abrir IFC"
+  // mientras se descarga un modelo grande arrancaba una carga en paralelo que
+  // volvia a descargarlo todo por debajo. Y el estado se limpia en el
+  // `finally`, para que un fallo al descargar no deje la barra apagada.
   const handleCerrarTodo = useCallback(async () => {
     const viewer = viewerRef.current
     if (!viewer || busyRef.current) return
-    await viewer.disposeAll()
-    setRoots([])
-    setNames(new Map())
-    setModelos([])
-    setOcultos(new Set())
-    setSelected(null)
-    setSelectedRefs([])
-    setItemData(null)
-    setMeta(null)
+
+    busyRef.current = true
+    setBusy(true)
+    try {
+      await viewer.disposeAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRoots([])
+      setNames(new Map())
+      setModelos([])
+      setOcultos(new Set())
+      setSelected(null)
+      setSelectedRefs([])
+      setItemData(null)
+      setMeta(null)
+      busyRef.current = false
+      setBusy(false)
+    }
   }, [])
 
   /**

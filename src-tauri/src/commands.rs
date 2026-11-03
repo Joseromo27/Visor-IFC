@@ -7,6 +7,7 @@
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
@@ -130,4 +131,87 @@ pub fn read_chunk(path: String, offset: u64, len: u32) -> Result<Response, Strin
 
     buf.truncate(filled);
     Ok(Response::new(buf))
+}
+
+/// Ruta de un IFC que el sistema operativo quiere abrir.
+///
+/// Windows entrega el archivo como argumento de linea de comandos, tanto al
+/// hacer doble clic como con "Abrir con". No se puede avisar al frontend por
+/// un evento sin mas: en el arranque en frio la ventana todavia no escucha
+/// cuando el proceso ya conoce la ruta, asi que se guarda aqui y el frontend
+/// la recoge al montarse.
+pub struct ArchivoPendiente(pub Mutex<Option<String>>);
+
+/// Entrega la ruta pendiente y la olvida. Devuelve `null` si no hay ninguna.
+#[tauri::command]
+pub fn archivo_pendiente(estado: tauri::State<ArchivoPendiente>) -> Option<String> {
+    estado.0.lock().ok().and_then(|mut guardia| guardia.take())
+}
+
+/// Primer argumento que apunta a un .ifc existente.
+///
+/// Se filtra por extension y por que el archivo exista, en vez de tomar el
+/// segundo argumento sin mirar: en desarrollo el ejecutable recibe argumentos
+/// propios de Tauri, y una ruta inventada haria fallar la carga nada mas
+/// arrancar.
+pub fn ifc_en_argumentos<I>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    args.into_iter().skip(1).find(|arg| {
+        !arg.starts_with('-')
+            && Path::new(arg)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("ifc"))
+            && Path::new(arg).is_file()
+    })
+}
+
+#[cfg(test)]
+mod pruebas {
+    use super::ifc_en_argumentos;
+
+    /// De esta funcion depende que el doble clic en Windows abra algo: lo que
+    /// llega es la linea de comandos entera, no una ruta limpia.
+    #[test]
+    fn elige_el_ifc_de_la_linea_de_comandos() {
+        let dir = std::env::temp_dir().join("visor-ifc-pruebas");
+        std::fs::create_dir_all(&dir).unwrap();
+        let modelo = dir.join("modelo.ifc");
+        std::fs::write(&modelo, b"ISO-10303-21;").unwrap();
+        let ruta = modelo.to_string_lossy().to_string();
+
+        let arg = |v: &[&str]| {
+            ifc_en_argumentos(v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+
+        // El caso real: el ejecutable y la ruta que entrega el explorador.
+        assert_eq!(arg(&["visor-ifc.exe", &ruta]), Some(ruta.clone()));
+
+        // Sin argumentos, arranque normal.
+        assert_eq!(arg(&["visor-ifc.exe"]), None);
+
+        // Las banderas no son rutas, y el propio ejecutable tampoco cuenta
+        // aunque se llamara como el archivo.
+        assert_eq!(arg(&["visor-ifc.exe", "--no-sandbox"]), None);
+
+        // Una ruta que no existe no se intenta abrir: en desarrollo llegan
+        // argumentos ajenos y una carga fallida al arrancar no se entiende.
+        assert_eq!(arg(&["visor-ifc.exe", r"C:\no\existe\modelo.ifc"]), None);
+
+        // Otro tipo de archivo se ignora, aunque exista.
+        let otro = dir.join("datos.txt");
+        std::fs::write(&otro, b"x").unwrap();
+        assert_eq!(arg(&["visor-ifc.exe", &otro.to_string_lossy()]), None);
+
+        // La extension puede venir en mayusculas.
+        let gritado = dir.join("MODELO.IFC");
+        std::fs::write(&gritado, b"ISO-10303-21;").unwrap();
+        assert_eq!(
+            arg(&["visor-ifc.exe", &gritado.to_string_lossy()]),
+            Some(gritado.to_string_lossy().to_string())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

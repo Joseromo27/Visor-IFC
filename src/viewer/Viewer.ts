@@ -80,6 +80,93 @@ const HOVER: FRAGS.MaterialDefinition = {
  *  no toca nada. Sin esto hay que acercarse mucho para poder pulsar algo. */
 const RADIOS_TOLERANCIA = [5, 11, 18]
 
+/**
+ * Vistas predeterminadas.
+ *
+ * **La vertical de la escena es +Y, no +Z.** El IFC viene con Z hacia arriba,
+ * pero web-ifc lo rota al convertir (`makeRotationX(-PI/2)` sobre el
+ * emplazamiento absoluto), de modo que dentro del visor Y es la cota y Z es el
+ * norte cambiado de signo. Se comprobo contra el propio archivo: el IFC de
+ * canales mide 13,5 km en X, 13,0 km en Y y solo 536 m en Z, y en la escena
+ * esos 536 m son los de Y.
+ *
+ * La primera version de estas vistas daba por hecho que la vertical era Z. El
+ * resultado no era un error visible sino vistas sin sentido: la "frontal"
+ * colocaba la camara debajo de la obra y mostraba el fondo, y la "inferior"
+ * salia del reves. De paso le cambiaba el `up` a la camara, con lo que la
+ * orbita quedaba girada despues de usarlas.
+ */
+export type Vista =
+  | 'planta'
+  | 'inferior'
+  | 'frontal'
+  | 'posterior'
+  | 'izquierda'
+  | 'derecha'
+  | 'isometrica'
+
+export const ETIQUETAS_VISTA: Record<Vista, string> = {
+  planta: 'Planta',
+  inferior: 'Inferior',
+  frontal: 'Frontal',
+  posterior: 'Posterior',
+  izquierda: 'Izquierda',
+  derecha: 'Derecha',
+  isometrica: 'Isometrica',
+}
+
+/**
+ * Cada vista en coordenadas esfericas de camera-controls, que es como hay que
+ * pedirlas para no tocar el `up` de la camara: el acimut gira alrededor de la
+ * vertical y el polar mide desde ella, con 0 mirando desde arriba, PI/2 al
+ * horizonte y PI desde abajo.
+ *
+ * Nada de colocar la camara a mano con `lookAt`: mirando en vertical, la
+ * direccion de la vista y el `up` se vuelven paralelos y la orientacion queda
+ * indefinida. Un pelo de margen en planta e inferior evita ese caso limite,
+ * y 0,0001 rad son seis milesimas de grado.
+ */
+const MARGEN_POLAR = 0.0001
+const ISOMETRICO = Math.atan(Math.SQRT1_2)
+
+const VISTAS: Record<Vista, { acimut: number; polar: number }> = {
+  planta: { acimut: 0, polar: MARGEN_POLAR },
+  inferior: { acimut: 0, polar: Math.PI - MARGEN_POLAR },
+  frontal: { acimut: 0, polar: Math.PI / 2 },
+  posterior: { acimut: Math.PI, polar: Math.PI / 2 },
+  derecha: { acimut: Math.PI / 2, polar: Math.PI / 2 },
+  izquierda: { acimut: -Math.PI / 2, polar: Math.PI / 2 },
+  isometrica: { acimut: Math.PI / 4, polar: ISOMETRICO },
+}
+
+/** Que se busca enganchar al medir, en orden de preferencia. */
+const CLASES_ENGANCHE = [
+  FRAGS.SnappingClass.POINT,
+  FRAGS.SnappingClass.LINE,
+  FRAGS.SnappingClass.FACE,
+]
+
+/**
+ * Ventaja en pixeles de cada clase de enganche.
+ *
+ * `raycastWithSnapping` devuelve a la vez el vertice, la arista y la cara que
+ * hay bajo el cursor. Elegir por distancia a la camara no sirve: lo que se
+ * quiere es el que se ve mas cerca de donde se apunta. Se comparan en pantalla
+ * y se le da ventaja al vertice sobre la arista que pasa por el, y a la arista
+ * sobre la cara, que es el orden en que uno espera que enganche.
+ */
+const VENTAJA_ENGANCHE: Record<number, number> = {
+  [FRAGS.SnappingClass.POINT]: 14,
+  [FRAGS.SnappingClass.LINE]: 6,
+  [FRAGS.SnappingClass.FACE]: 0,
+}
+
+/** Distancia maxima en pantalla para que un enganche cuente. */
+const TOLERANCIA_ENGANCHE = 24
+
+/** Color de las mediciones. Elegido para destacar sobre ambos temas. */
+const COLOR_MEDICION = 0xffb703
+
 /** Tope de espera para una actualizacion de fragments. Holgado a proposito:
  *  en un modelo de cientos de MB una actualizacion legitima puede tardar
  *  segundos, y pasarse de listo aqui solo adelantaria trabajo a medias. */
@@ -104,7 +191,78 @@ type Entrada = {
   idsRecoloreables: number[][]
   /** Si el modelo esta mostrado u oculto entero desde la lista. */
   visible: boolean
+  /**
+   * Nombre de cada elemento con geometria, resuelto al cargar.
+   *
+   * Se guarda porque ya se pagaba: las reglas de color los piden todos al
+   * montar el modelo. Volver a pedirlos para buscar elementos parecidos
+   * costaria lo mismo otra vez, y en un archivo grande eso son segundos.
+   */
+  nombres: Map<number, string>
+  /** Categoria IFC de cada elemento. Se arma la primera vez que hace falta. */
+  categorias: Map<number, string> | null
 }
+
+/** Una medicion de distancia entre dos puntos. */
+export type Medicion = {
+  id: number
+  a: THREE.Vector3
+  b: THREE.Vector3
+  /** Distancia en metros. */
+  distancia: number
+}
+
+/** Una etiqueta de medicion ya proyectada a la pantalla. */
+export type EtiquetaMedicion = {
+  id: number
+  x: number
+  y: number
+  texto: string
+  /** La medicion en curso, que todavia sigue al cursor. */
+  provisional: boolean
+}
+
+/** Que hace un clic en el visor. */
+export type ModoVisor = 'seleccion' | 'medir'
+
+export type CriterioSimilar = 'nombre' | 'categoria'
+
+/**
+ * Lo que se puede seleccionar a partir de un elemento, con su cuenta.
+ *
+ * Hubo un tercer criterio, "nombre y categoria a la vez". Se quito porque en
+ * la practica no aporta: en estos modelos el nombre ya es mas restrictivo que
+ * la categoria, asi que la interseccion devolvia casi siempre lo mismo que el
+ * nombre solo y lo unico que hacia era una opcion mas que leer.
+ */
+export type ResumenSimilares = {
+  referencia: Ref
+  nombre: string | null
+  categoria: string | null
+  porNombre: Ref[]
+  porCategoria: Ref[]
+}
+
+/**
+ * Nombre sin el numero de orden del final.
+ *
+ * Istram exporta los elementos numerados ("MARCO 1", "MARCO 2"), asi que
+ * comparar el nombre tal cual solo encontraria el propio elemento. Lo que
+ * interesa es la familia.
+ */
+export const baseNombre = (nombre: string) =>
+  nombre
+    .trim()
+    .replace(/[\s_.-]*\d+([.,]\d+)?$/, '')
+    .trim()
+    .toLowerCase() || nombre.trim().toLowerCase()
+
+/** Distancia en metros, con precision de milimetro. */
+export const formatearDistancia = (metros: number) =>
+  `${metros.toLocaleString('es-CL', {
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3,
+  })} m`
 
 export type ModeloMontado = {
   modelId: string
@@ -145,6 +303,36 @@ export class Viewer {
 
   /** Se dispara al hacer clic en el modelo. `null` al hacer clic en vacio. */
   onSelect: ((ref: Ref | null) => void) | null = null
+
+  /** Se dispara cuando cambia la lista de mediciones o la que esta en curso. */
+  onMediciones: ((mediciones: Medicion[]) => void) | null = null
+
+  // --- Medicion ------------------------------------------------------------
+
+  private modo: ModoVisor = 'seleccion'
+  private mediciones: Medicion[] = []
+  private siguienteMedicion = 1
+  /** Primer punto de la medicion en curso, si ya se marco. */
+  private puntoA: THREE.Vector3 | null = null
+  /** Punto enganchado bajo el cursor. */
+  private puntoCursor: THREE.Vector3 | null = null
+  private grupoMedicion = new THREE.Group()
+  private materialLinea = new THREE.LineBasicMaterial({
+    color: COLOR_MEDICION,
+    // Las mediciones se ven a traves del modelo a proposito: medir entre dos
+    // caras opuestas es justo el caso en que una de ellas queda detras.
+    depthTest: false,
+    transparent: true,
+  })
+  private materialPunto = new THREE.PointsMaterial({
+    color: COLOR_MEDICION,
+    // En tamano de pantalla y no del mundo: en un modelo de kilometros una
+    // esfera de tamano fijo o no se ve o tapa el puente entero.
+    size: 9,
+    sizeAttenuation: false,
+    depthTest: false,
+    transparent: true,
+  })
 
   get hasModel() {
     return this.modelos.size > 0
@@ -201,6 +389,11 @@ export class Viewer {
       void this.actualizar()
     })
 
+    // Las mediciones se dibujan al final y sin prueba de profundidad, para
+    // que no queden enterradas en la geometria que estan midiendo.
+    this.grupoMedicion.renderOrder = 999
+    this.world.scene.three.add(this.grupoMedicion)
+
     container.addEventListener('pointerdown', this.handlePointerDown)
     container.addEventListener('pointerup', this.handlePointerUp)
     container.addEventListener('pointermove', this.handlePointerMove)
@@ -233,6 +426,15 @@ export class Viewer {
     void (async () => {
       try {
         const dom = this.world.renderer!.three.domElement
+        if (this.modo === 'medir') {
+          // Midiendo no se resalta nada: lo que se sigue es el punto
+          // enganchado, y resaltar ademas el elemento bajo el cursor llena la
+          // pantalla de azul justo cuando hay que mirar un vertice.
+          const enganche = await this.puntoEnganchado(e.clientX, e.clientY, dom)
+          this.puntoCursor = enganche?.punto ?? null
+          this.redibujarMediciones()
+          return
+        }
         const hit = await this.buscarBajoCursor(
           new THREE.Vector2(e.clientX, e.clientY),
           dom,
@@ -245,6 +447,11 @@ export class Viewer {
   }
 
   private handlePointerLeave = () => {
+    if (this.modo === 'medir') {
+      this.puntoCursor = null
+      this.redibujarMediciones()
+      return
+    }
     void this.setHover(null)
   }
 
@@ -260,6 +467,10 @@ export class Viewer {
     const moved = Math.hypot(e.clientX - from.x, e.clientY - from.y)
     if (moved > 4) return
 
+    if (this.modo === 'medir') {
+      void this.marcarPunto(e)
+      return
+    }
     void this.pick(e)
   }
 
@@ -400,6 +611,8 @@ export class Viewer {
       idsConGeometria: new Set(await model.getItemsIdsWithGeometry()),
       idsRecoloreables: [],
       visible: true,
+      nombres: new Map(),
+      categorias: null,
     }
     this.modelos.set(modelId, entrada)
 
@@ -539,7 +752,14 @@ export class Viewer {
       posicion: c.position.clone(),
       objetivo,
       distancia: c.position.distanceTo(objetivo),
+      /** Vertical de la camara. Las vistas no deben cambiarla. */
+      arriba: c.up.clone(),
     }
+  }
+
+  /** Caja de todo lo montado. Para diagnostico y para las pruebas. */
+  getCajaTotal(): THREE.Box3 {
+    return this.cajaTotal()
   }
 
   /** Planos de recorte vigentes. Para diagnostico. */
@@ -572,6 +792,9 @@ export class Viewer {
     this.seleccionado = null
     this.sobrevolado = null
     this.origenComun = null
+    // Las mediciones cuelgan de una geometria que ya no esta; dejarlas
+    // flotando en el vacio seria peor que perderlas.
+    this.borrarMediciones()
     await this.actualizar()
   }
 
@@ -936,6 +1159,17 @@ export class Viewer {
       // anota para que la lista de modelos no diga lo contrario que la escena.
       entrada.visible = !!ids
     }
+
+    // El centro de giro pasa a ser lo que queda visible, sin mover la camara.
+    // Si no, la orbita sigue girando alrededor del ultimo punto que se pulso,
+    // que despues de aislar suele estar dentro de algo ya oculto: la camara
+    // da vueltas en torno a un sitio donde no hay nada.
+    const caja = await this.cajaDe(refs)
+    if (caja) {
+      const centro = caja.getCenter(new THREE.Vector3())
+      this.world.camera.controls.setOrbitPoint(centro.x, centro.y, centro.z)
+    }
+
     await this.actualizar()
   }
 
@@ -1044,6 +1278,9 @@ export class Viewer {
 
     const ids = [...entrada.idsConGeometria]
     const nombres = await this.getNames(entrada.model.modelId, ids)
+    // Se guardan para despues: buscar elementos parecidos necesita los mismos
+    // nombres, y volver a pedirlos cuesta otra vez lo que acaba de costar.
+    entrada.nombres = nombres
     for (const id of ids) {
       const nombre = nombres.get(id)
       if (!nombre) continue
@@ -1149,7 +1386,19 @@ export class Viewer {
    * boton no haga nada sin decir por que.
    */
   async fitToItems(refs: Ref[]) {
-    if (refs.length === 0) return
+    const caja = await this.cajaDe(refs)
+    if (!caja) return
+    await this.world.camera.controls.fitToBox(caja, true, {
+      paddingLeft: 1,
+      paddingRight: 1,
+      paddingTop: 1,
+      paddingBottom: 1,
+    })
+  }
+
+  /** Caja que engloba unos elementos, o `null` si ninguno tiene geometria. */
+  private async cajaDe(refs: Ref[]): Promise<THREE.Box3 | null> {
+    if (refs.length === 0) return null
 
     const total = new THREE.Box3()
     total.makeEmpty()
@@ -1163,14 +1412,334 @@ export class Viewer {
       const box = await entrada.model.getMergedBox(conGeometria)
       if (!box.isEmpty()) total.union(box)
     }
+    return total.isEmpty() ? null : total
+  }
 
-    if (total.isEmpty()) return
-    await this.world.camera.controls.fitToBox(total, true, {
+  // --- Vistas predeterminadas ----------------------------------------------
+
+  /**
+   * Coloca la camara en una vista conocida sobre los elementos indicados, o
+   * sobre todo lo montado si no se pasa ninguno.
+   *
+   * Se gira primero sin animacion y se encuadra despues con ella: `fitToBox`
+   * conserva la direccion de la camara, asi que el orden importa, y animar
+   * los dos pasos encadenaria dos vuelos en vez de uno. El giro va sobre el
+   * objetivo que haya en ese momento; el encuadre posterior es el que lleva
+   * la camara al sitio.
+   *
+   * El `up` de la camara no se toca. Es la vertical de la escena y cambiarlo
+   * deja la orbita girada para todo lo que venga despues.
+   */
+  async vistaPredeterminada(vista: Vista, refs: Ref[] = []) {
+    const caja = refs.length > 0 ? await this.cajaDe(refs) : this.cajaTotal()
+    if (!caja || caja.isEmpty()) return
+
+    const { acimut, polar } = VISTAS[vista]
+    const controles = this.world.camera.controls
+
+    await controles.rotateTo(acimut, polar, false)
+    await controles.fitToBox(caja, true, {
       paddingLeft: 1,
       paddingRight: 1,
       paddingTop: 1,
       paddingBottom: 1,
     })
+  }
+
+  // --- Elementos parecidos -------------------------------------------------
+
+  /**
+   * Que elementos se parecen al indicado, por nombre, por categoria y por
+   * ambas cosas a la vez.
+   *
+   * Devuelve las tres listas en lugar de aplicar una: con 1300 elementos en
+   * el archivo chico y muchos mas en los grandes, conviene que se vea cuantos
+   * atrapa cada criterio antes de ocultar medio modelo.
+   */
+  async buscarSimilares(ref: Ref): Promise<ResumenSimilares | null> {
+    const origen = this.modelos.get(ref.modelId)
+    if (!origen) return null
+
+    const nombre = origen.nombres.get(ref.localId) ?? null
+    const categoria = (await this.indiceCategorias(origen)).get(ref.localId) ?? null
+    const base = nombre ? baseNombre(nombre) : null
+
+    const porNombre: Ref[] = []
+    const porCategoria: Ref[] = []
+
+    for (const [modelId, entrada] of this.modelos) {
+      const cats = categoria ? await this.indiceCategorias(entrada) : null
+      for (const localId of entrada.idsConGeometria) {
+        const n = entrada.nombres.get(localId)
+        if (base && n && baseNombre(n) === base) {
+          porNombre.push({ modelId, localId })
+        }
+        if (categoria && cats?.get(localId) === categoria) {
+          porCategoria.push({ modelId, localId })
+        }
+      }
+    }
+
+    return { referencia: ref, nombre, categoria, porNombre, porCategoria }
+  }
+
+  /**
+   * Categoria IFC de cada elemento del modelo.
+   *
+   * Se arma una sola vez y a peticion: `getItemsOfCategories` con todas las
+   * categorias devuelve el modelo entero, y no hace falta mientras nadie
+   * busque elementos parecidos.
+   */
+  private async indiceCategorias(entrada: Entrada): Promise<Map<number, string>> {
+    if (entrada.categorias) return entrada.categorias
+
+    const mapa = new Map<number, string>()
+    try {
+      const categorias = await entrada.model.getCategories()
+      const porCategoria = await entrada.model.getItemsOfCategories(
+        categorias.map((c) => new RegExp(`^${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)),
+      )
+      for (const [categoria, ids] of Object.entries(porCategoria)) {
+        for (const id of ids) mapa.set(id, categoria)
+      }
+    } catch (err) {
+      console.warn('No se pudieron leer las categorias del modelo', err)
+    }
+
+    entrada.categorias = mapa
+    return mapa
+  }
+
+  // --- Medicion ------------------------------------------------------------
+
+  getModo(): ModoVisor {
+    return this.modo
+  }
+
+  /** Cambia lo que hace un clic. Al salir de medir se abandona lo a medias. */
+  setModo(modo: ModoVisor) {
+    if (this.modo === modo) return
+    this.modo = modo
+    this.puntoA = null
+    this.puntoCursor = null
+    if (modo === 'medir') void this.setHover(null)
+    this.redibujarMediciones()
+  }
+
+  getMediciones(): Medicion[] {
+    return this.mediciones
+  }
+
+  /** Si hay una medicion empezada y sin cerrar. */
+  hayMedicionEnCurso(): boolean {
+    return this.puntoA !== null
+  }
+
+  /** Abandona la medicion a medias, dejando las ya tomadas. */
+  cancelarMedicion() {
+    if (!this.puntoA && !this.puntoCursor) return
+    this.puntoA = null
+    this.redibujarMediciones()
+  }
+
+  borrarMedicion(id: number) {
+    this.mediciones = this.mediciones.filter((m) => m.id !== id)
+    this.redibujarMediciones()
+  }
+
+  borrarMediciones() {
+    this.mediciones = []
+    this.puntoA = null
+    this.redibujarMediciones()
+  }
+
+  /**
+   * Marca un punto. El primero abre la medicion y el segundo la cierra.
+   *
+   * Expuesto ademas de usarse desde el raton para poder probarlo sin depender
+   * de donde caiga el cursor.
+   */
+  async marcarEn(x: number, y: number): Promise<Medicion | null> {
+    const dom = this.world.renderer?.three.domElement
+    if (!dom || !this.hasModel) return null
+
+    const enganche = await this.puntoEnganchado(x, y, dom)
+    if (!enganche) return null
+
+    if (!this.puntoA) {
+      this.puntoA = enganche.punto
+      this.puntoCursor = enganche.punto.clone()
+      this.redibujarMediciones()
+      return null
+    }
+
+    const medicion: Medicion = {
+      id: this.siguienteMedicion++,
+      a: this.puntoA.clone(),
+      b: enganche.punto.clone(),
+      distancia: this.puntoA.distanceTo(enganche.punto),
+    }
+    this.mediciones = [...this.mediciones, medicion]
+    this.puntoA = null
+    this.redibujarMediciones()
+    return medicion
+  }
+
+  private async marcarPunto(e: PointerEvent) {
+    await this.marcarEn(e.clientX, e.clientY)
+  }
+
+  /**
+   * Punto enganchado bajo el cursor.
+   *
+   * `raycastWithSnapping` no devuelve un punto sino todos los candidatos que
+   * hay bajo el rayo — vertices, aristas y la cara —, asi que hay que elegir.
+   * Se comparan proyectados a pantalla, porque lo que se quiere es el que se
+   * ve mas cerca de donde se apunta, no el mas cercano a la camara.
+   *
+   * Si ninguno cae dentro de la tolerancia se usa el punto donde el rayo toca
+   * la geometria: medir a ojo sobre una cara es preferible a no poder medir.
+   */
+  private async puntoEnganchado(
+    x: number,
+    y: number,
+    dom: HTMLCanvasElement,
+  ): Promise<{ punto: THREE.Vector3; clase: FRAGS.SnappingClass | null } | null> {
+    if (!this.hasModel) return null
+
+    const camera = this.world.camera.three
+    const mouse = new THREE.Vector2(x, y)
+    const listas = await Promise.all(
+      [...this.modelos.values()]
+        .filter((e) => e.visible)
+        .map((e) =>
+          e.model
+            .raycastWithSnapping({
+              camera,
+              mouse,
+              dom,
+              snappingClasses: CLASES_ENGANCHE,
+            })
+            .catch(() => null),
+        ),
+    )
+
+    let mejor: FRAGS.RaycastResult | null = null
+    let mejorCoste = Infinity
+    for (const lista of listas) {
+      for (const candidato of lista ?? []) {
+        const p = this.proyectar(candidato.point)
+        if (!p) continue
+        const coste =
+          Math.hypot(p.x - x, p.y - y) -
+          (VENTAJA_ENGANCHE[candidato.snappingClass] ?? 0)
+        if (coste < mejorCoste) {
+          mejorCoste = coste
+          mejor = candidato
+        }
+      }
+    }
+
+    if (mejor && mejorCoste <= TOLERANCIA_ENGANCHE) {
+      return { punto: mejor.point.clone(), clase: mejor.snappingClass }
+    }
+
+    const hit = await this.buscarBajoCursor(mouse, dom)
+    return hit ? { punto: hit.point.clone(), clase: null } : null
+  }
+
+  /**
+   * Rehace la geometria de las mediciones.
+   *
+   * Se rehace entera en vez de actualizarla en sitio: son unas pocas lineas y
+   * un punado de puntos, y asi no hay estado que mantener en orden.
+   */
+  private redibujarMediciones() {
+    for (const hijo of [...this.grupoMedicion.children]) {
+      this.grupoMedicion.remove(hijo)
+      const conGeometria = hijo as THREE.Mesh
+      conGeometria.geometry?.dispose()
+    }
+
+    const segmentos: number[] = []
+    const puntos: number[] = []
+    for (const m of this.mediciones) {
+      segmentos.push(m.a.x, m.a.y, m.a.z, m.b.x, m.b.y, m.b.z)
+      puntos.push(m.a.x, m.a.y, m.a.z, m.b.x, m.b.y, m.b.z)
+    }
+
+    // La medicion en curso se dibuja igual que las demas: la goma elastica
+    // hasta el cursor es lo que deja ver cuanto va a medir antes de soltar.
+    if (this.modo === 'medir') {
+      if (this.puntoA && this.puntoCursor) {
+        segmentos.push(
+          this.puntoA.x, this.puntoA.y, this.puntoA.z,
+          this.puntoCursor.x, this.puntoCursor.y, this.puntoCursor.z,
+        )
+      }
+      if (this.puntoA) puntos.push(this.puntoA.x, this.puntoA.y, this.puntoA.z)
+      if (this.puntoCursor) {
+        puntos.push(this.puntoCursor.x, this.puntoCursor.y, this.puntoCursor.z)
+      }
+    }
+
+    if (segmentos.length > 0) {
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(segmentos, 3))
+      const lineas = new THREE.LineSegments(geo, this.materialLinea)
+      lineas.renderOrder = 999
+      lineas.frustumCulled = false
+      this.grupoMedicion.add(lineas)
+    }
+
+    if (puntos.length > 0) {
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(puntos, 3))
+      const nube = new THREE.Points(geo, this.materialPunto)
+      nube.renderOrder = 1000
+      nube.frustumCulled = false
+      this.grupoMedicion.add(nube)
+    }
+
+    this.onMediciones?.(this.mediciones)
+  }
+
+  /**
+   * Etiquetas de las mediciones ya proyectadas a la pantalla.
+   *
+   * Van en coordenadas de ventana, como todo lo que cruza entre el visor y la
+   * interfaz, para no tener que restar la posicion del lienzo en cada sitio.
+   */
+  getEtiquetas(): EtiquetaMedicion[] {
+    const etiquetas: EtiquetaMedicion[] = []
+    for (const m of this.mediciones) {
+      const medio = m.a.clone().add(m.b).multiplyScalar(0.5)
+      const p = this.proyectar(medio)
+      if (!p) continue
+      etiquetas.push({
+        id: m.id,
+        x: p.x,
+        y: p.y,
+        texto: formatearDistancia(m.distancia),
+        provisional: false,
+      })
+    }
+
+    if (this.modo === 'medir' && this.puntoA && this.puntoCursor) {
+      const medio = this.puntoA.clone().add(this.puntoCursor).multiplyScalar(0.5)
+      const p = this.proyectar(medio)
+      if (p) {
+        etiquetas.push({
+          id: 0,
+          x: p.x,
+          y: p.y,
+          texto: formatearDistancia(this.puntoA.distanceTo(this.puntoCursor)),
+          provisional: true,
+        })
+      }
+    }
+
+    return etiquetas
   }
 
   dispose() {
@@ -1181,6 +1750,9 @@ export class Viewer {
     this.container = null
     this.modelos.clear()
     this.origenComun = null
+    this.borrarMediciones()
+    this.materialLinea.dispose()
+    this.materialPunto.dispose()
     this.components.dispose()
   }
 }

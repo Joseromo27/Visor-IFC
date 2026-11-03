@@ -99,6 +99,100 @@ el rayo y las cajas, asi que la seleccion sigue cayendo donde se ve el elemento.
 Como los `localId` solo son unicos dentro de su archivo, desde aqui todo el
 visor identifica un elemento con `Ref = { modelId, localId }`.
 
+## La barra: visualizacion y medicion
+
+La barra tenia trece controles en una sola fila y ya no se leia. Los archivos
+quedan arriba, porque son el punto de partida, y debajo hay una **cinta
+siempre desplegada** con los grupos a la vista: visibilidad, transparencia,
+vistas, camara y medicion, cada uno con su rotulo debajo como en AutoCAD.
+
+Primero fueron dos menus desplegables, y duraron una version. Trabajando de
+verdad con un modelo abierto casi todo es aislar, ocultar y transparentar una
+y otra vez, y con los menus cada accion costaba abrir el panel antes. Se pierde
+una franja de alto fija y se gana un clic en cada operacion.
+
+### Vistas predeterminadas
+
+Planta, inferior, las cuatro laterales e isometrica, encuadradas en la
+seleccion — o en todo lo montado si no hay nada elegido.
+
+Lo delicado es cual es el "arriba", y la primera version lo tuvo mal. **La
+vertical de la escena es +Y, no +Z**: el IFC viene con Z hacia arriba, pero
+web-ifc lo rota al convertir — `makeRotationX(-PI/2)` premultiplicado al
+emplazamiento absoluto —, de modo que dentro del visor Y es la cota y Z es el
+norte cambiado de signo. Se comprobo contra el propio archivo: el IFC de
+canales mide 13,5 km en X, 13,0 km en Y y solo 536 m en Z, y en la escena esos
+536 m son los de Y.
+
+Dando por buena la vertical equivocada, las vistas no fallaban: salian sin
+sentido. La "frontal" dejaba la camara debajo de la obra y mostraba el fondo, y
+la "inferior" salia del reves. Peor aun, cada vista le fijaba el `up` a la
+camara, asi que despues de usar una la orbita giraba sobre un plano torcido.
+
+Ahora las vistas se piden en coordenadas esfericas a camera-controls
+(`rotateTo` con acimut y polar) y **no se toca el `up` de la camara**, que es
+la vertical de la escena y ya era la correcta. Mirando en vertical, la
+direccion de la vista y el `up` se vuelven paralelos y la orientacion queda
+indefinida, asi que planta e inferior llevan un margen de 0,0001 rad — seis
+milesimas de grado — para no caer en ese caso limite.
+
+La prueba no mira si "se ve bien", mira desde donde mira la camara: en planta
+la camara tiene que estar por encima del techo del elemento, en inferior por
+debajo de su suelo, en frontal a su misma cota, y el `up` tiene que seguir
+siendo (0, 1, 0) al terminar. Con la version anterior, la frontal pasaba una
+comprobacion de "direccion horizontal" estando debajo de la obra; por eso la
+comprobacion ahora es de que lado, no de que eje.
+
+### Elementos similares
+
+A partir del elemento elegido se ofrecen dos criterios con su cuenta antes de
+aplicar nada: mismo nombre o misma categoria IFC. Ver el numero antes importa:
+en el modelo de canales, "ZAPATA DESAGUE IZQUIERDA MODULO 1" da 79 elementos
+por nombre y 593 por categoria, porque Istram exporta casi todo como
+`IFCBUILDINGELEMENTPROXY`. Ocultar por categoria sin ver esa cifra parece que
+borra medio proyecto.
+
+Hubo un tercer criterio, "nombre y categoria a la vez". Se quito tras probarlo:
+el nombre ya es mas restrictivo que la categoria, asi que la interseccion
+devolvia practicamente lo mismo que el nombre solo (69 frente a 79 en ese
+ejemplo) y lo unico que anadia era una opcion mas que leer.
+
+El nombre se compara sin el numero de orden del final ("MARCO 1" y "MARCO 2"
+son la misma familia). Los nombres ya estaban resueltos: las reglas de color
+los piden todos al montar el modelo, asi que buscar parecidos no vuelve a
+pagarlos. Las categorias si se consultan a peticion, la primera vez que hacen
+falta.
+
+### Medir distancias
+
+Dos clics, con enganche a vertice, arista o cara. Mientras se mide, el clic no
+selecciona y el cursor pasa a cruz.
+
+`raycastWithSnapping` no devuelve un punto sino **todos** los candidatos bajo
+el rayo a la vez — vertices, aristas y la cara —, asi que hay que elegir. No
+sirve el mas cercano a la camara: lo que se quiere es el que se ve mas cerca
+del cursor, de modo que se comparan proyectados a pantalla, en pixeles, con
+ventaja para el vertice sobre la arista y para la arista sobre la cara. Si
+ninguno cae dentro de la tolerancia se usa el punto donde el rayo toca la
+geometria, que es preferible a no poder medir.
+
+Las lineas y los puntos van en la escena, sin prueba de profundidad para que no
+queden enterrados en lo que estan midiendo; las cifras van en HTML encima del
+lienzo, recolocadas proyectando el punto medio en cada fotograma, porque un
+rotulo en 3D se deforma con la camara justo cuando hay que leerlo. Como los
+modelos solo llevan restado el origen comun, un desplazamiento igual para
+todos, las distancias son las reales del proyecto sin ninguna conversion.
+
+Lo que la prueba verifica no es que salga un numero, sino que los dos puntos
+caigan **dentro de la caja del elemento al que se apunto**: el fallo que no
+avisa es que el enganche devuelva coordenadas de otro sistema, donde la cifra
+seguiria pareciendo razonable y estaria medida a kilometros de donde se pulso.
+
+No hizo falta subir @thatopen a 3.6 ni traer `components-front`: el enganche
+(`raycastWithSnapping`) y el volumen por elemento (`MeasurementUtils`) ya
+estaban en las versiones instaladas, y evitarlo ahorro invalidar el cache de
+conversion de todos los modelos.
+
 ## Cerrar y volver a abrir
 
 "Cerrar todo" quita los modelos montados y deja el visor vacio. Abrir otro
@@ -290,13 +384,17 @@ src/
   UiTest.tsx                    prueba sobre la interfaz real, con clics
   components/ModelTree.tsx      arbol jerarquico, montado de forma perezosa
   components/PropertiesPanel.tsx  property sets del elemento seleccionado
+  components/Toolbar.tsx        fila superior: archivos y opciones
+  components/Cinta.tsx          cinta desplegada con los grupos de trabajo
+  components/PanelSimilares.tsx eleccion de criterio para buscar parecidos
+  components/CapaMediciones.tsx rotulos de las medidas, encima del lienzo
   lib/bridge.ts                 protocolo del SharedArrayBuffer
   lib/conversion.ts             dialogo, cache y orquestacion del worker
   lib/tree.ts                   aplanado del arbol espacial, una raiz por archivo
   lib/log.ts                    reenvio de la consola del WebView al log de Rust
   lib/updater.ts                actualizacion automatica
-  viewer/Viewer.ts              escena, camara, seleccion, visibilidad y
-                                coordinacion entre modelos
+  viewer/Viewer.ts              escena, camara, seleccion, visibilidad,
+                                coordinacion entre modelos, vistas y medicion
   workers/ifcConverter.worker.ts  conversion IFC -> Fragments
 src-tauri/
   src/commands.rs               metadatos, ruta de cache y lectura por trozos

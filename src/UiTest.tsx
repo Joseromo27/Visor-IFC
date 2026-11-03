@@ -9,10 +9,11 @@
 
 import { useEffect, useState } from 'react'
 import { exit } from '@tauri-apps/plugin-process'
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import * as THREE from 'three'
 
 import App from './App'
-import { claveRef, type Viewer } from './viewer/Viewer'
+import { claveRef, mismaRef, type Viewer } from './viewer/Viewer'
 
 declare global {
   interface Window {
@@ -134,8 +135,18 @@ export default function UiTest({ path }: { path: string }) {
           'el arbol se vuelve a poblar',
           `${filasArbol()} filas`,
         )
+        // Se miran las dos filas: la de archivos y la cinta. El cuelgue que
+        // esto vigila dejaba todos los botones apagados menos "Opciones".
+        const enCintaHabilitado = (texto: string) =>
+          [...document.querySelectorAll<HTMLButtonElement>('.cinta button')]
+            .find((b) => b.textContent?.trim().startsWith(texto))?.disabled === false
         check(
-          await esperarA(() => boton('Aislar') !== null && boton('Abrir IFC')?.disabled === false, 20000),
+          await esperarA(
+            () =>
+              boton('Abrir IFC')?.disabled === false &&
+              enCintaHabilitado('Mostrar'),
+            20000,
+          ),
           'la barra sigue utilizable despues del ciclo',
         )
 
@@ -314,8 +325,18 @@ export default function UiTest({ path }: { path: string }) {
                 c.dispatchEvent(new PointerEvent('pointermove', {
                   clientX: punto.x + dx, clientY: punto.y, bubbles: true, pointerId: 1,
                 }))
-                await esperar(220)
-                if ((await visor.getHighlighted()).length > 0) { desfase = dx; break }
+                // Con holgura y no con una espera fija: el seguimiento del
+                // cursor va limitado en el tiempo y no se solapa consigo
+                // mismo, asi que una consulta puede tardar bastante mas que
+                // de costumbre si la maquina esta ocupada. Con 220 ms fijos,
+                // una instancia suelta de otra corrida bastaba para que esta
+                // medida acusara un desfase de 40 px que no existia.
+                let marcado = false
+                for (let i = 0; i < 6 && !marcado; i++) {
+                  await esperar(180)
+                  marcado = (await visor.getHighlighted()).length > 0
+                }
+                if (marcado) { desfase = dx; break }
               }
               decir(`desfase horizontal necesario para acertar: ${desfase === null ? 'no se encontro' : desfase + ' px'}`)
               check(
@@ -411,6 +432,369 @@ export default function UiTest({ path }: { path: string }) {
               'NOTA: con el modelo entero a la vista no se acierta en ningun punto;' +
                 ' a esa escala los elementos miden menos de un pixel',
             )
+          }
+
+          // --- Cinta, vistas predeterminadas, similares y medicion ---
+
+          const enCinta = (texto: string) =>
+            [...document.querySelectorAll<HTMLButtonElement>('.cinta button')]
+              .find((b) => b.textContent?.trim().startsWith(texto)) ?? null
+
+          check(
+            document.querySelectorAll('.cinta-grupo').length >= 5,
+            'la cinta esta desplegada con sus grupos',
+            `${document.querySelectorAll('.cinta-grupo').length} grupos`,
+          )
+          check(
+            !!enCinta('Aislar') && !!enCinta('Ocultar') && !!enCinta('Mostrar'),
+            'la cinta tiene a la vista los controles de visibilidad',
+          )
+          check(
+            !!enCinta('Planta') && !!enCinta('Isometrica') && !!enCinta('Derecha'),
+            'la cinta tiene a la vista las vistas predeterminadas',
+          )
+          check(
+            !!enCinta('Similares') && !!enCinta('Medir'),
+            'la cinta tiene a la vista similares y medicion',
+          )
+
+          // --- La barra se adapta al ancho de la ventana ---
+          //
+          // Lo que no puede pasar es que haya que desplazarse por la barra
+          // para alcanzar un boton. Se comprueba midiendo el desbordamiento
+          // real a tres anchos, no mirando que clase tiene puesta.
+          const cinta = () => document.querySelector<HTMLElement>('.cinta')
+          const desborda = () => {
+            const c = cinta()
+            return c ? c.scrollWidth > c.clientWidth + 1 : false
+          }
+          const disposicion = () => {
+            const c = cinta()
+            if (!c) return 'sin cinta'
+            if (c.classList.contains('is-menus')) return 'menus'
+            return c.classList.contains('is-compacta') ? 'compacta' : 'completa'
+          }
+
+          const ventana = getCurrentWindow()
+          const tamanoOriginal = await ventana.innerSize()
+          const escala = await ventana.scaleFactor()
+          const anchear = async (ancho: number) => {
+            await ventana.setSize(new LogicalSize(ancho, 900))
+            // Dos cosas tienen que asentarse: el redimensionado del sistema y
+            // la remedida de la barra, que ocurre en el siguiente pintado.
+            await esperar(900)
+          }
+
+          await anchear(1440)
+          const anchaDisposicion = disposicion()
+          check(
+            !desborda(),
+            `con la ventana ancha la barra cabe entera (${anchaDisposicion})`,
+            `${cinta()?.scrollWidth} px de contenido en ${cinta()?.clientWidth} px`,
+          )
+
+          await anchear(1100)
+          const mediaDisposicion = disposicion()
+          check(
+            !desborda(),
+            `al encoger, la barra se acomoda sin desplazamiento (${mediaDisposicion})`,
+            `${cinta()?.scrollWidth} px de contenido en ${cinta()?.clientWidth} px`,
+          )
+
+          await anchear(780)
+          const estrechaDisposicion = disposicion()
+          check(
+            estrechaDisposicion === 'menus',
+            'con la ventana estrecha la barra pasa a menus desplegables',
+            `disposicion ${estrechaDisposicion}`,
+          )
+          check(
+            !desborda(),
+            'tampoco desborda en modo menus',
+            `${cinta()?.scrollWidth} px de contenido en ${cinta()?.clientWidth} px`,
+          )
+          // Los controles siguen estando, solo que dentro del desplegable.
+          const botonMenu = [
+            ...document.querySelectorAll<HTMLButtonElement>('.cinta button'),
+          ].find((b) => b.textContent?.trim().startsWith('Visualizacion'))
+          botonMenu?.click()
+          await esperar(300)
+          check(
+            !!document.querySelector('.menu-panel') &&
+              [...document.querySelectorAll('.menu-panel button')].some(
+                (b) => b.textContent?.trim() === 'Aislar',
+              ),
+            'el desplegable conserva los controles de la cinta',
+          )
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+          )
+          await esperar(250)
+
+          await ventana.setSize(
+            new LogicalSize(
+              Math.round(tamanoOriginal.width / escala),
+              Math.round(tamanoOriginal.height / escala),
+            ),
+          )
+          await esperar(900)
+          check(
+            disposicion() !== 'menus' && !desborda(),
+            'al volver a ensanchar, la barra vuelve a desplegarse',
+            `disposicion ${disposicion()}`,
+          )
+          decir(
+            `disposiciones: 1440 px -> ${anchaDisposicion}, 1100 px -> ${mediaDisposicion},` +
+              ` 780 px -> ${estrechaDisposicion}, al volver -> ${disposicion()}`,
+          )
+
+          // Cual es la vertical del dato, contrastado contra el propio IFC:
+          // el archivo de canales mide 13,5 km en X, 13,0 km en Y y 536 m en
+          // Z, y web-ifc rota Z arriba a Y arriba al convertir. En la escena,
+          // por tanto, la cota tiene que ser el eje mas corto, y ser Y.
+          const tamano = visor.getCajaTotal().getSize(new THREE.Vector3())
+          decir(
+            `tamano de la escena: X ${tamano.x.toFixed(0)} m,` +
+              ` Y ${tamano.y.toFixed(0)} m, Z ${tamano.z.toFixed(0)} m`,
+          )
+          check(
+            tamano.y < tamano.x && tamano.y < tamano.z,
+            'la vertical de la escena es Y, que es el eje mas corto de una obra lineal',
+            `Y mide ${tamano.y.toFixed(0)} m frente a ${tamano.x.toFixed(0)} y ${tamano.z.toFixed(0)}`,
+          )
+
+          // Las vistas tienen que mirar segun el eje que dicen y, sobre todo,
+          // desde el lado que dicen: la primera version colocaba la frontal
+          // debajo de la obra y mostraba el fondo, con una direccion de
+          // camara que igualmente "parecia" horizontal.
+          const estadoCamara = () => {
+            const cam = visor.getCameraState()
+            return {
+              ...cam,
+              direccion: cam.objetivo.clone().sub(cam.posicion).normalize(),
+            }
+          }
+          const cajaVista = (await visor.getItemBoxes([masPequeno]))[0]
+          const alto = cajaVista.max.y - cajaVista.min.y
+
+          await visor.vistaPredeterminada('planta', [masPequeno])
+          await esperar(1800)
+          const planta = estadoCamara()
+          check(
+            planta.direccion.y < -0.98,
+            'la planta mira hacia abajo segun la vertical',
+            `direccion (${planta.direccion.toArray().map((n) => n.toFixed(2)).join(', ')})`,
+          )
+          check(
+            planta.posicion.y > cajaVista.max.y,
+            'la planta mira el elemento desde encima, no desde debajo',
+            `camara a cota ${planta.posicion.y.toFixed(1)} y techo del elemento en ${cajaVista.max.y.toFixed(1)}`,
+          )
+
+          await visor.vistaPredeterminada('inferior', [masPequeno])
+          await esperar(1800)
+          const inferior = estadoCamara()
+          check(
+            inferior.direccion.y > 0.98 && inferior.posicion.y < cajaVista.min.y,
+            'la inferior mira hacia arriba desde debajo del elemento',
+            `direccion (${inferior.direccion.toArray().map((n) => n.toFixed(2)).join(', ')}),` +
+              ` camara a cota ${inferior.posicion.y.toFixed(1)} y suelo del elemento en ${cajaVista.min.y.toFixed(1)}`,
+          )
+
+          await visor.vistaPredeterminada('frontal', [masPequeno])
+          await esperar(1800)
+          const frontal = estadoCamara()
+          check(
+            Math.abs(frontal.direccion.y) < 0.05,
+            'la frontal mira en horizontal, no desde arriba ni desde abajo',
+            `direccion (${frontal.direccion.toArray().map((n) => n.toFixed(2)).join(', ')})`,
+          )
+          check(
+            Math.abs(frontal.posicion.y - cajaVista.getCenter(new THREE.Vector3()).y) <
+              Math.max(1, alto),
+            'en la frontal la camara esta a la altura del elemento',
+            `camara a cota ${frontal.posicion.y.toFixed(1)}, elemento entre` +
+              ` ${cajaVista.min.y.toFixed(1)} y ${cajaVista.max.y.toFixed(1)}`,
+          )
+
+          // Y lo que rompia la orbita: ninguna vista puede tocar la vertical
+          // de la camara. Si se cambia, todo lo que se orbite despues gira
+          // sobre un plano distinto.
+          const arriba = visor.getCameraState().arriba
+          check(
+            Math.abs(arriba.y - 1) < 1e-6 && Math.abs(arriba.x) < 1e-6 && Math.abs(arriba.z) < 1e-6,
+            'las vistas no alteran la vertical de la camara',
+            `up (${arriba.toArray().map((n) => n.toFixed(3)).join(', ')})`,
+          )
+
+          // Y que el elemento quede de verdad encuadrado, no fuera de cuadro.
+          const centroEncuadre = await visor.centroDe(masPequeno)
+          const enPantalla = centroEncuadre ? visor.proyectar(centroEncuadre) : null
+          check(
+            !!enPantalla &&
+              enPantalla.x > caja.left &&
+              enPantalla.x < caja.right &&
+              enPantalla.y > caja.top &&
+              enPantalla.y < caja.bottom,
+            'la vista predeterminada deja el elemento dentro del cuadro',
+            enPantalla
+              ? `(${enPantalla.x.toFixed(0)}, ${enPantalla.y.toFixed(0)}) en un lienzo de ${caja.width.toFixed(0)}x${caja.height.toFixed(0)}`
+              : 'no se pudo proyectar',
+          )
+
+          // Elementos parecidos.
+          const resumen = await visor.buscarSimilares(masPequeno)
+          check(!!resumen, 'se puede analizar un elemento para buscar parecidos')
+          if (resumen) {
+            decir(
+              `similares de "${resumen.nombre}" (${resumen.categoria}):` +
+                ` por nombre ${resumen.porNombre.length},` +
+                ` por categoria ${resumen.porCategoria.length}`,
+            )
+            check(
+              resumen.porNombre.some((r) => mismaRef(r, masPequeno)),
+              'el elemento de partida esta entre sus propios parecidos',
+            )
+            check(
+              resumen.porNombre.length > 0 && resumen.porCategoria.length > 0,
+              'los dos criterios devuelven algo',
+            )
+          }
+
+          // --- Medir ---
+          const [cajaObjetivo] = await visor.getItemBoxes([masPequeno])
+          if (cajaObjetivo && !cajaObjetivo.isEmpty()) {
+            await visor.fitToItems([masPequeno])
+            await esperar(2000)
+
+            // Dos puntos separados sobre el propio elemento: se proyectan sus
+            // ocho esquinas y se apunta dentro del rectangulo que ocupan.
+            const esquinas: { x: number; y: number }[] = []
+            for (const ex of [cajaObjetivo.min.x, cajaObjetivo.max.x]) {
+              for (const ey of [cajaObjetivo.min.y, cajaObjetivo.max.y]) {
+                for (const ez of [cajaObjetivo.min.z, cajaObjetivo.max.z]) {
+                  const p = visor.proyectar(new THREE.Vector3(ex, ey, ez))
+                  if (p) esquinas.push(p)
+                }
+              }
+            }
+            const xs = esquinas.map((p) => p.x)
+            const ys = esquinas.map((p) => p.y)
+            const medioY = (Math.min(...ys) + Math.max(...ys)) / 2
+            const anchoX = Math.max(...xs) - Math.min(...xs)
+            const x1 = Math.min(...xs) + anchoX * 0.25
+            const x2 = Math.min(...xs) + anchoX * 0.75
+
+            enCinta('Medir')?.click()
+            await esperar(300)
+            check(
+              !!document.querySelector('.viewport.is-midiendo'),
+              'activar la medicion cambia el modo del visor',
+            )
+
+            const marcadosAntes = (await visor.getHighlighted())
+              .map(claveRef)
+              .sort()
+              .join(',')
+            const pulsarEn = async (px: number, py: number) => {
+              const base = {
+                clientX: px, clientY: py, bubbles: true,
+                cancelable: true, pointerId: 1, button: 0,
+              }
+              c.dispatchEvent(new PointerEvent('pointermove', base))
+              await esperar(250)
+              c.dispatchEvent(new PointerEvent('pointerdown', base))
+              c.dispatchEvent(new PointerEvent('pointerup', base))
+              await esperar(400)
+            }
+            await pulsarEn(x1, medioY)
+            await pulsarEn(x2, medioY)
+
+            const medidas = visor.getMediciones()
+            check(
+              medidas.length === 1,
+              'dos clics cierran una medida',
+              `${medidas.length} medidas tras dos clics en (${x1.toFixed(0)}, ${medioY.toFixed(0)}) y (${x2.toFixed(0)}, ${medioY.toFixed(0)})`,
+            )
+
+            if (medidas.length === 1) {
+              const m = medidas[0]
+              const diagonal = cajaObjetivo.max.distanceTo(cajaObjetivo.min)
+              // Lo que de verdad puede fallar sin avisar es que los puntos
+              // salgan en otro sistema de coordenadas: la cifra pareceria
+              // razonable y estaria medida a kilometros de donde se pulso.
+              const holgura = cajaObjetivo
+                .clone()
+                .expandByScalar(Math.max(0.5, diagonal * 0.05))
+              check(
+                holgura.containsPoint(m.a) && holgura.containsPoint(m.b),
+                'los puntos medidos caen sobre el elemento al que se apunto',
+                `a (${m.a.toArray().map((n) => n.toFixed(1)).join(', ')})` +
+                  ` b (${m.b.toArray().map((n) => n.toFixed(1)).join(', ')})` +
+                  ` dentro de ${holgura.min.toArray().map((n) => n.toFixed(1)).join(', ')}` +
+                  ` .. ${holgura.max.toArray().map((n) => n.toFixed(1)).join(', ')}`,
+              )
+              check(
+                m.distancia > 0 && m.distancia <= diagonal * 1.05,
+                'la distancia medida cabe dentro del elemento',
+                `${m.distancia.toFixed(3)} m frente a una diagonal de ${diagonal.toFixed(3)} m`,
+              )
+            }
+
+            const marcadosDespues = (await visor.getHighlighted())
+              .map(claveRef)
+              .sort()
+              .join(',')
+            check(
+              marcadosDespues === marcadosAntes,
+              'mientras se mide, pulsar no cambia la seleccion',
+              `[${marcadosAntes}] -> [${marcadosDespues}]`,
+            )
+            check(
+              await esperarA(
+                () => document.querySelectorAll('.medida-etiqueta').length > 0,
+                4000,
+              ),
+              'la medida se rotula encima del modelo',
+            )
+
+            visor.borrarMediciones()
+            check(
+              await esperarA(
+                () => document.querySelectorAll('.medida-etiqueta').length === 0,
+                3000,
+              ),
+              'borrar las medidas las quita de la pantalla',
+            )
+
+            // Escape: primero abandona la medida a medias y solo despues sale
+            // de la herramienta. Equivocarse en el segundo punto es mucho mas
+            // frecuente que querer salir.
+            const escape = () =>
+              window.dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+              )
+            await pulsarEn(x1, medioY)
+            check(
+              visor.hayMedicionEnCurso(),
+              'el primer clic deja una medida empezada',
+            )
+            escape()
+            await esperar(250)
+            check(
+              !visor.hayMedicionEnCurso() && visor.getModo() === 'medir',
+              'Escape abandona la medida a medias sin apagar la herramienta',
+              `modo ${visor.getModo()}`,
+            )
+            escape()
+            await esperar(250)
+            check(
+              visor.getModo() === 'seleccion',
+              'el segundo Escape sale de la herramienta',
+              `modo ${visor.getModo()}`,
+            )
+            visor.borrarMediciones()
+            await esperar(200)
           }
 
           // --- Varios modelos montados a la vez ---

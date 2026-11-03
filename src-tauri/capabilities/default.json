@@ -16,6 +16,9 @@
     "updater:default",
     "process:allow-restart",
     "log:default",
-    "process:allow-exit"
+    "process:allow-exit",
+    "core:window:allow-set-size",
+    "core:window:allow-inner-size",
+    "core:window:allow-scale-factor"
   ]
 }

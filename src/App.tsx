@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ItemData } from '@thatopen/fragments'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
+import { CapaMediciones } from './components/CapaMediciones'
+import { Cinta } from './components/Cinta'
 import { ModelTree } from './components/ModelTree'
+import { PanelSimilares } from './components/PanelSimilares'
 import { SettingsMenu } from './components/SettingsMenu'
 import { Toolbar } from './components/Toolbar'
 import { PropertiesPanel } from './components/PropertiesPanel'
@@ -20,7 +25,16 @@ import {
   type Ajustes,
 } from './lib/settings'
 import { checkForUpdate, type UpdateInfo } from './lib/updater'
-import { claveRef, Viewer, type ModeloMontado, type Ref } from './viewer/Viewer'
+import {
+  claveRef,
+  Viewer,
+  type Medicion,
+  type ModeloMontado,
+  type ModoVisor,
+  type Ref,
+  type ResumenSimilares,
+  type Vista,
+} from './viewer/Viewer'
 import './App.css'
 
 const formatSize = (bytes: number) =>
@@ -79,6 +93,14 @@ export default function App() {
   const [modelos, setModelos] = useState<ModeloMontado[]>([])
   const [ocultos, setOcultos] = useState<Set<string>>(new Set())
 
+  // El mismo visor que la ref, pero en estado: la capa de medidas lo necesita
+  // durante el pintado, y una ref no provoca el repintado en que aparece.
+  const [visor, setVisor] = useState<Viewer | null>(null)
+  const [modo, setModo] = useState<ModoVisor>('seleccion')
+  const [mediciones, setMediciones] = useState<Medicion[]>([])
+  const [similares, setSimilares] = useState<ResumenSimilares | null>(null)
+  const [buscandoSimilares, setBuscandoSimilares] = useState(false)
+
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateProgress, setUpdateProgress] = useState<number | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -131,10 +153,15 @@ export default function App() {
     const viewer = new Viewer()
     viewer.init(canvasRef.current)
     viewer.onSelect = selectFromViewport
+    // El visor es quien sabe cuando se cierra una medida o se descarga todo;
+    // la interfaz solo refleja su lista.
+    viewer.onMediciones = (lista) => setMediciones(lista)
     viewerRef.current = viewer
+    setVisor(viewer)
     return () => {
       viewer.dispose()
       viewerRef.current = null
+      setVisor(null)
     }
   }, [selectFromViewport])
 
@@ -250,6 +277,38 @@ export default function App() {
     [],
   )
 
+  /**
+   * Archivos que llegan desde el escritorio: doble clic sobre un .ifc o
+   * "Abrir con".
+   *
+   * Hacen falta los dos caminos. En el arranque en frio el proceso conoce la
+   * ruta antes de que la ventana exista, asi que el evento se perderia: esa
+   * se pide una vez al montar. Con la aplicacion ya abierta, la segunda
+   * instancia reenvia la ruta a esta y llega por evento.
+   */
+  useEffect(() => {
+    const desdeElSistema = (ruta: string, via: string) => {
+      // Queda en el log a proposito: si el doble clic no abre nada en el
+      // equipo de otra persona, esta linea distingue entre "no llego la ruta"
+      // y "llego y la carga fallo", que se arreglan en sitios distintos.
+      console.info(`Abriendo desde el sistema (${via}): ${ruta}`)
+      void openPath(ruta)
+    }
+
+    void invoke<string | null>('archivo_pendiente')
+      .then((ruta) => {
+        if (ruta) desdeElSistema(ruta, 'arranque')
+      })
+      .catch((err) => console.warn('No se pudo consultar el archivo inicial', err))
+
+    const suscripcion = listen<string>('abrir-ifc', (evento) => {
+      if (evento.payload) desdeElSistema(evento.payload, 'ventana ya abierta')
+    })
+    return () => {
+      void suscripcion.then((cancelar) => cancelar())
+    }
+  }, [openPath])
+
   // Solo en modo prueba de interfaz: permite abrir un archivo sin pasar por
   // el dialogo nativo, que no se puede automatizar.
   useEffect(() => {
@@ -323,6 +382,86 @@ export default function App() {
     },
     [ocultos],
   )
+
+  // --- Vistas, similares y medicion ----------------------------------------
+
+  const handleVista = useCallback(
+    (vista: Vista) => {
+      // Sin seleccion se encuadra todo lo montado, que es lo util cuando se
+      // quiere ver la obra entera en planta.
+      void viewerRef.current?.vistaPredeterminada(vista, selectedRefs)
+    },
+    [selectedRefs],
+  )
+
+  const handleBuscarSimilares = useCallback(async () => {
+    const viewer = viewerRef.current
+    if (!viewer || !selected || buscandoSimilares) return
+
+    setBuscandoSimilares(true)
+    try {
+      const resumen = await viewer.buscarSimilares(selected)
+      if (resumen) setSimilares(resumen)
+      else setError('No se pudo analizar ese elemento.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBuscandoSimilares(false)
+    }
+  }, [selected, buscandoSimilares])
+
+  const handleAplicarSimilares = useCallback(
+    (refs: Ref[], accion: 'seleccionar' | 'aislar' | 'ocultar') => {
+      const viewer = viewerRef.current
+      setSimilares(null)
+      if (!viewer) return
+
+      setSelectedRefs(refs)
+      void (async () => {
+        if (accion === 'aislar') {
+          await viewer.isolate(refs)
+        } else if (accion === 'ocultar') {
+          await viewer.hide(refs)
+        }
+        setOcultos(
+          new Set(
+            viewer
+              .getModelos()
+              .filter((m) => !m.visible)
+              .map((m) => m.modelId),
+          ),
+        )
+      })()
+    },
+    [],
+  )
+
+  const handleCambiarModo = useCallback((nuevo: ModoVisor) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    viewer.setModo(nuevo)
+    setModo(nuevo)
+  }, [])
+
+  // Escape primero abandona la medida a medias y solo despues sale del modo:
+  // equivocarse en el segundo punto es mucho mas frecuente que querer salir,
+  // y perder la herramienta a la primera obliga a volver al menu cada vez.
+  useEffect(() => {
+    if (modo !== 'medir') return
+    const tecla = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const viewer = viewerRef.current
+      if (!viewer) return
+      if (viewer.hayMedicionEnCurso()) {
+        viewer.cancelarMedicion()
+      } else {
+        viewer.setModo('seleccion')
+        setModo('seleccion')
+      }
+    }
+    window.addEventListener('keydown', tecla)
+    return () => window.removeEventListener('keydown', tecla)
+  }, [modo])
 
   // Arrastrar y soltar: el WebView de Tauri entrega rutas reales del sistema
   // de archivos, no objetos File del navegador.
@@ -432,16 +571,44 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="toolbar">
-        <Toolbar
+      <header className="barra">
+        <div className="toolbar">
+          <Toolbar
+            ocupado={busy}
+            hayModelo={hasModel}
+            onAbrir={handleOpen}
+            onAnadir={() => void handleAnadir()}
+            onCerrarTodo={() => void handleCerrarTodo()}
+            onAbrirAjustes={() => setAjustesAbiertos(true)}
+          >
+            {meta && (
+              <div
+                className="meta"
+                title={modelos.map((m) => m.nombre).join('\n') || meta.name}
+              >
+                <strong>
+                  {modelos.length > 1 ? 'Varios modelos' : meta.name}
+                </strong>
+                <span>{resumenCabecera(meta, modelos)}</span>
+              </div>
+            )}
+          </Toolbar>
+        </div>
+
+        <Cinta
           ocupado={busy}
           hayModelo={hasModel}
           haySeleccion={hasSelection}
+          haySeleccionUnica={selected !== null}
           opacidad={ajustes.opacidad}
           navegacion={ajustes.navegacion}
-          onAbrir={handleOpen}
-          onAnadir={() => void handleAnadir()}
-          onCerrarTodo={() => void handleCerrarTodo()}
+          modo={modo}
+          mediciones={mediciones}
+          onVista={handleVista}
+          onBuscarSimilares={() => void handleBuscarSimilares()}
+          onCambiarModo={handleCambiarModo}
+          onBorrarMedicion={(id) => viewerRef.current?.borrarMedicion(id)}
+          onBorrarMediciones={() => viewerRef.current?.borrarMediciones()}
           onAislar={act(async (v) => {
             await v.isolate(selectedRefs)
             sincronizarOcultos(v)
@@ -465,20 +632,7 @@ export default function App() {
           onQuitarTransparencia={act((v) => v.resetOpacity())}
           onCambiarOpacidad={(opacidad) => cambiarAjustes({ opacidad })}
           onCambiarNavegacion={(navegacion) => cambiarAjustes({ navegacion })}
-          onAbrirAjustes={() => setAjustesAbiertos(true)}
         />
-
-        {meta && (
-          <div
-            className="meta"
-            title={modelos.map((m) => m.nombre).join('\n') || meta.name}
-          >
-            <strong>
-              {modelos.length > 1 ? 'Varios modelos' : meta.name}
-            </strong>
-            <span>{resumenCabecera(meta, modelos)}</span>
-          </div>
-        )}
       </header>
 
       {update && (
@@ -535,8 +689,17 @@ export default function App() {
           </div>
         </aside>
 
-        <div className={`viewport${dragging ? ' is-dragging' : ''}`}>
+        <div
+          className={`viewport${dragging ? ' is-dragging' : ''}${
+            modo === 'medir' ? ' is-midiendo' : ''
+          }`}
+        >
           <div ref={canvasRef} className="canvas-host" />
+
+          <CapaMediciones
+            viewer={visor}
+            activo={mediciones.length > 0 || modo === 'medir'}
+          />
 
           {!hasModel && !busy && (
             <div className="placeholder">
@@ -628,6 +791,14 @@ export default function App() {
           </div>
         </aside>
       </main>
+
+      {similares && (
+        <PanelSimilares
+          resumen={similares}
+          onAplicar={handleAplicarSimilares}
+          onCerrar={() => setSimilares(null)}
+        />
+      )}
 
       {ajustesAbiertos && (
         <SettingsMenu

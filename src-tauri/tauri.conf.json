@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Visor IFC",
-  "version": "0.3.1",
+  "version": "0.4.2",
   "identifier": "cl.len.visorifc",
   "build": {
     "frontendDist": "../dist",
@@ -15,7 +15,7 @@
         "title": "Visor IFC",
         "width": 1440,
         "height": 900,
-        "minWidth": 1024,
+        "minWidth": 760,
         "minHeight": 640,
         "resizable": true,
         "fullscreen": false,
@@ -55,7 +55,15 @@
         ]
       }
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "fileAssociations": [
+      {
+        "ext": ["ifc"],
+        "name": "Modelo IFC",
+        "description": "Modelo IFC",
+        "mimeType": "application/x-step"
+      }
+    ]
   },
   "plugins": {
     "updater": {

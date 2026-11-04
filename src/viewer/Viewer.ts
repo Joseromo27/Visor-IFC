@@ -27,6 +27,16 @@ export const mismaRef = (a: Ref | null, b: Ref | null) =>
 
 export const claveRef = (r: Ref) => `${r.modelId}:${r.localId}`
 
+/** Inversa de `claveRef`. El modelId no lleva dos puntos, asi que basta con
+ *  partir por el ultimo. */
+export const desdeClave = (clave: string): Ref => {
+  const corte = clave.lastIndexOf(':')
+  return {
+    modelId: clave.slice(0, corte),
+    localId: Number(clave.slice(corte + 1)),
+  }
+}
+
 /** Agrupa referencias por modelo, que es como hay que pedir casi todo. */
 const agrupar = (refs: Ref[]): Map<string, number[]> => {
   const porModelo = new Map<string, number[]>()
@@ -76,9 +86,36 @@ const HOVER: FRAGS.MaterialDefinition = {
   transparent: false,
 }
 
+/** Marca de lo que no va a salir en el entregable. Rojo: es una exclusion,
+ *  no una seleccion, y tiene que leerse como tal de un vistazo. */
+const EXCLUIDO: FRAGS.MaterialDefinition = {
+  color: new THREE.Color(0xd64545),
+  renderedFaces: FRAGS.RenderedFaces.TWO,
+  opacity: 1,
+  transparent: false,
+}
+
+/** Excluido y ademas seleccionado: ni una cosa ni la otra pueden ganar en
+ *  silencio, asi que se distingue con un tono propio. */
+const EXCLUIDO_SELECCIONADO: FRAGS.MaterialDefinition = {
+  color: new THREE.Color(0xff8c42),
+  renderedFaces: FRAGS.RenderedFaces.TWO,
+  opacity: 1,
+  transparent: false,
+}
+
 /** Radios en pixeles que se prueban alrededor del cursor si el punto exacto
  *  no toca nada. Sin esto hay que acercarse mucho para poder pulsar algo. */
 const RADIOS_TOLERANCIA = [5, 11, 18]
+
+/** Pausa a partir de la cual un giro de rueda cuenta como gesto nuevo y se
+ *  vuelve a anclar el zoom. Por encima del amortiguado de la libreria
+ *  (`smoothTime` = 0,2 s) para no cortar la animacion anterior a medias. */
+const REPOSO_RUEDA = 300
+
+/** Cuanto puede haberse movido el cursor desde que se resolvio el punto para
+ *  seguir usandolo como ancla del zoom, en pixeles. */
+const TOLERANCIA_ANCLA = 12
 
 /**
  * Vistas predeterminadas.
@@ -223,7 +260,7 @@ export type EtiquetaMedicion = {
 }
 
 /** Que hace un clic en el visor. */
-export type ModoVisor = 'seleccion' | 'medir'
+export type ModoVisor = 'seleccion' | 'medir' | 'ventana'
 
 export type CriterioSimilar = 'nombre' | 'categoria'
 
@@ -279,9 +316,15 @@ export class Viewer {
   private modelos = new Map<string, Entrada>()
   private container: HTMLElement | null = null
   private temaActual: Tema = 'oscuro'
+  /** Modo de navegacion vigente: la rueda no hace lo mismo en cada uno. */
+  private navegacion: Navegacion = 'Orbit'
   /** Elemento seleccionado y elemento bajo el cursor. */
   private seleccionado: Ref | null = null
   private sobrevolado: Ref | null = null
+  /** Marcados para no salir en el entregable, por clave compuesta. */
+  private excluidos = new Set<string>()
+  /** Seleccion multiple viva, la que deja una ventana de seleccion. */
+  private marcados = new Set<string>()
   /** Contador para generar identificadores de modelo unicos. */
   private siguienteId = 1
 
@@ -349,6 +392,31 @@ export class Viewer {
     }))
   }
 
+  /**
+   * GlobalId de cada elemento, que es como se le nombra dentro del IFC.
+   *
+   * El `localId` solo vale dentro de esta sesion; para tocar el archivo de
+   * origen hace falta el GUID, que es lo unico que los dos lados comparten.
+   */
+  async getGuids(refs: Ref[]): Promise<Map<string, string>> {
+    const guids = new Map<string, string>()
+    for (const [modelId, localIds] of agrupar(refs)) {
+      const entrada = this.modelos.get(modelId)
+      if (!entrada) continue
+      const lista = await entrada.model.getGuidsByLocalIds(localIds)
+      localIds.forEach((localId, i) => {
+        const g = lista[i]
+        if (g) guids.set(claveRef({ modelId, localId }), g)
+      })
+    }
+    return guids
+  }
+
+  /** Nombre ya resuelto de un elemento, para mostrarlo en listas. */
+  getNombre(ref: Ref): string | null {
+    return this.modelos.get(ref.modelId)?.nombres.get(ref.localId) ?? null
+  }
+
   /** Busca si ya hay montado un archivo con esa ruta. */
   modeloDeRuta(ruta: string): string | null {
     for (const [modelId, e] of this.modelos) if (e.ruta === ruta) return modelId
@@ -394,6 +462,20 @@ export class Viewer {
     this.grupoMedicion.renderOrder = 999
     this.world.scene.three.add(this.grupoMedicion)
 
+    this.ajustarControles()
+
+    // En captura, antes que camera-controls: el anclaje del zoom tiene que
+    // estar puesto cuando la libreria calcule el paso de la rueda. Escuchando
+    // despues, el primer tic de cada gesto se daba con la distancia vieja y
+    // era justo el que pegaba el salto.
+    container.addEventListener('wheel', this.handleWheel, {
+      passive: true,
+      capture: true,
+    })
+    // En captura, antes que camera-controls: ver handleVentanaDown.
+    container.addEventListener('pointerdown', this.handleVentanaDown, true)
+    container.addEventListener('pointermove', this.handleVentanaMove, true)
+    container.addEventListener('pointerup', this.handleVentanaUp, true)
     container.addEventListener('pointerdown', this.handlePointerDown)
     container.addEventListener('pointerup', this.handlePointerUp)
     container.addEventListener('pointermove', this.handlePointerMove)
@@ -432,6 +514,7 @@ export class Viewer {
           // pantalla de azul justo cuando hay que mirar un vertice.
           const enganche = await this.puntoEnganchado(e.clientX, e.clientY, dom)
           this.puntoCursor = enganche?.punto ?? null
+          this.recordarImpacto(e, enganche?.punto ?? null)
           this.redibujarMediciones()
           return
         }
@@ -439,6 +522,7 @@ export class Viewer {
           new THREE.Vector2(e.clientX, e.clientY),
           dom,
         )
+        this.recordarImpacto(e, hit?.point ?? null)
         await this.setHover(hit ? refDe(hit) : null)
       } finally {
         this.hoverEnCurso = false
@@ -446,13 +530,223 @@ export class Viewer {
     })()
   }
 
+  // --- Seleccion por ventana ------------------------------------------------
+
+  /** Esquina donde empezo el arrastre, y el rectangulo que lo dibuja. */
+  private ventanaDesde: { x: number; y: number } | null = null
+  private cajaVentana: HTMLDivElement | null = null
+
+  /** Se dispara con lo que atrapa una ventana de seleccion. */
+  onSeleccionMultiple: ((refs: Ref[]) => void) | null = null
+
+  /**
+   * Arranca una ventana de seleccion si toca.
+   *
+   * Va en fase de captura y detiene el evento: camera-controls escucha en el
+   * lienzo, que esta por debajo, y si el evento le llega empieza a orbitar
+   * mientras se dibuja el rectangulo.
+   *
+   * Se activa con el modo de la cinta o manteniendo Mayusculas, que es el
+   * atajo que espera quien ya trabaja con esto a diario.
+   */
+  private handleVentanaDown = (e: PointerEvent) => {
+    if (e.button !== 0 || !this.hasModel) return
+    if (this.modo !== 'ventana' && !e.shiftKey) return
+
+    e.stopPropagation()
+    e.preventDefault()
+    this.ventanaDesde = { x: e.clientX, y: e.clientY }
+
+    if (!this.cajaVentana && this.container) {
+      const caja = document.createElement('div')
+      caja.className = 'ventana-seleccion'
+      this.container.appendChild(caja)
+      this.cajaVentana = caja
+    }
+    this.dibujarVentana(e.clientX, e.clientY)
+  }
+
+  private handleVentanaMove = (e: PointerEvent) => {
+    if (!this.ventanaDesde) return
+    e.stopPropagation()
+    this.dibujarVentana(e.clientX, e.clientY)
+  }
+
+  private handleVentanaUp = (e: PointerEvent) => {
+    const desde = this.ventanaDesde
+    if (!desde) return
+    e.stopPropagation()
+    this.ventanaDesde = null
+    if (this.cajaVentana) this.cajaVentana.style.display = 'none'
+
+    const ancho = Math.abs(e.clientX - desde.x)
+    const alto = Math.abs(e.clientY - desde.y)
+    // Un arrastre de dos pixeles es un clic con pulso, no una ventana.
+    if (ancho < 5 || alto < 5) return
+
+    void this.atraparEnVentana(
+      new THREE.Vector2(Math.min(desde.x, e.clientX), Math.min(desde.y, e.clientY)),
+      new THREE.Vector2(Math.max(desde.x, e.clientX), Math.max(desde.y, e.clientY)),
+    )
+  }
+
+  private dibujarVentana(x: number, y: number) {
+    const caja = this.cajaVentana
+    const desde = this.ventanaDesde
+    if (!caja || !desde || !this.container) return
+    const r = this.container.getBoundingClientRect()
+    caja.style.display = 'block'
+    caja.style.left = `${Math.min(desde.x, x) - r.left}px`
+    caja.style.top = `${Math.min(desde.y, y) - r.top}px`
+    caja.style.width = `${Math.abs(x - desde.x)}px`
+    caja.style.height = `${Math.abs(y - desde.y)}px`
+  }
+
+  /**
+   * Que elementos caen dentro de la ventana.
+   *
+   * `fullyIncluded: false` a proposito: en obra lineal casi nada cabe entero
+   * en pantalla, y exigirlo haria que una ventana sobre un muro largo no
+   * atrapara nada. Vale con que la ventana lo toque.
+   */
+  private async atraparEnVentana(
+    topLeft: THREE.Vector2,
+    bottomRight: THREE.Vector2,
+  ) {
+    const dom = this.world.renderer?.three.domElement
+    if (!dom) return
+
+    const camera = this.world.camera.three
+    const refs: Ref[] = []
+    for (const [modelId, entrada] of this.modelos) {
+      if (!entrada.visible) continue
+      const r = await entrada.model.rectangleRaycast({
+        camera,
+        dom,
+        topLeft,
+        bottomRight,
+        fullyIncluded: false,
+      })
+      for (const localId of r?.localIds ?? []) refs.push({ modelId, localId })
+    }
+
+    this.seleccionado = null
+    await this.setMarcados(refs)
+    this.onSeleccionMultiple?.(refs)
+  }
+
+  /** Momento del ultimo giro de rueda, para distinguir gestos. */
+  private ultimaRueda = 0
+
+  /**
+   * Ultimo punto resuelto bajo el cursor, con la posicion de pantalla en la
+   * que se resolvio. Lo llena el seguimiento del cursor, que ya tira el rayo.
+   */
+  private ultimoImpacto: {
+    x: number
+    y: number
+    punto: THREE.Vector3
+  } | null = null
+
+  /**
+   * Ancla el zoom en la profundidad de lo que hay bajo el cursor.
+   *
+   * La rueda de camera-controls es geometrica: cada tic multiplica por un
+   * factor fijo la distancia al objetivo. El paso vale, por tanto, lo que
+   * valga esa distancia, y si el objetivo esta en el centro del proyecto
+   * —que es donde lo deja un encuadre general— uno avanza a razon de cientos
+   * de metros mientras mira un sumidero a dos. Poniendo el objetivo en lo que
+   * hay bajo el cursor, el avance pasa a ser la misma fraccion de lo que uno
+   * tiene delante tanto de lejos como de cerca.
+   *
+   * Dos cosas que costaron una version:
+   *
+   * El punto sale de lo ya resuelto al pasar el cursor por encima, no de un
+   * rayo nuevo. El rayo nuevo tarda decenas de milisegundos y llegaba con el
+   * zoom ya en marcha; `setOrbitPoint` reescribe la distancia al objetivo de
+   * golpe, asi que aterrizar a mitad de un gesto cortaba en seco la animacion
+   * en curso. Ese era el rebote.
+   *
+   * Y por lo mismo solo se reancla al empezar un gesto, con la animacion
+   * anterior ya terminada: dentro de un gesto hay que converger al punto que
+   * se eligio al empezarlo.
+   */
+  private handleWheel = (e: WheelEvent) => {
+    const ahora = performance.now()
+    const quieta = ahora - this.ultimaRueda > REPOSO_RUEDA
+    this.ultimaRueda = ahora
+    if (!quieta || !this.hasModel) return
+    // En primera persona la rueda no es un zoom, es la marcha adelante.
+    if (this.navegacion === 'FirstPerson') return
+
+    const ancla = this.anclaZoom(e.clientX, e.clientY)
+    if (ancla) {
+      this.world.camera.controls.setOrbitPoint(ancla.x, ancla.y, ancla.z)
+    }
+  }
+
+  /**
+   * Donde converge el zoom, o `null` para dejar el objetivo donde este.
+   *
+   * Apuntando a geometria, a esa geometria. Apuntando al vacio no se reancla:
+   * el objetivo que haya es lo ultimo que se miro y es la referencia menos
+   * sorprendente. Solo se rescata el caso en que el objetivo se ha quedado
+   * pegado a la camara, que es cuando la rueda deja de servir —cada tic
+   * recorta una fraccion de nada— y hay que empujarlo hacia delante.
+   */
+  private anclaZoom(x: number, y: number): THREE.Vector3 | null {
+    const camara = this.world.camera.three
+    const ultimo = this.ultimoImpacto
+    if (ultimo && Math.hypot(ultimo.x - x, ultimo.y - y) < TOLERANCIA_ANCLA) {
+      const vista = camara.getWorldDirection(new THREE.Vector3())
+      const hacia = ultimo.punto.clone().sub(camara.position)
+      // Si entretanto la camara ha girado y el punto ha quedado detras, ya no
+      // sirve de referencia.
+      if (hacia.dot(vista) > 0) return ultimo.punto.clone()
+    }
+
+    const caja = this.cajaTotal()
+    const diagonal = caja.isEmpty()
+      ? 100
+      : caja.getSize(new THREE.Vector3()).length()
+    const minima = Math.max(diagonal * 0.001, 0.5)
+    if (this.world.camera.controls.distance >= minima) return null
+
+    const rayo = this.rayoDesde(x, y)
+    if (!rayo) return null
+    return camara.position.clone().addScaledVector(rayo.ray.direction, minima)
+  }
+
+  /** Rayo que sale de la camara por el punto de pantalla indicado. */
+  private rayoDesde(x: number, y: number): THREE.Raycaster | null {
+    const dom = this.world.renderer?.three.domElement
+    if (!dom) return null
+    const r = dom.getBoundingClientRect()
+    const ndc = new THREE.Vector2(
+      ((x - r.left) / r.width) * 2 - 1,
+      -((y - r.top) / r.height) * 2 + 1,
+    )
+
+    const rayo = new THREE.Raycaster()
+    rayo.setFromCamera(ndc, this.world.camera.three)
+    return rayo
+  }
+
   private handlePointerLeave = () => {
+    this.ultimoImpacto = null
     if (this.modo === 'medir') {
       this.puntoCursor = null
       this.redibujarMediciones()
       return
     }
     void this.setHover(null)
+  }
+
+  /** Guarda donde cayo el rayo, para que la rueda no tenga que repetirlo. */
+  private recordarImpacto(e: PointerEvent, punto: THREE.Vector3 | null) {
+    this.ultimoImpacto = punto
+      ? { x: e.clientX, y: e.clientY, punto: punto.clone() }
+      : null
   }
 
   private handlePointerDown = (e: PointerEvent) => {
@@ -465,7 +759,12 @@ export class Viewer {
     if (!from || !this.hasModel) return
 
     const moved = Math.hypot(e.clientX - from.x, e.clientY - from.y)
-    if (moved > 4) return
+    if (moved > 4) {
+      // Orbitar o desplazar mueve la camara sin que el cursor cambie de sitio:
+      // lo que se habia resuelto bajo el ya no esta debajo.
+      this.ultimoImpacto = null
+      return
+    }
 
     if (this.modo === 'medir') {
       void this.marcarPunto(e)
@@ -618,6 +917,7 @@ export class Viewer {
 
     await this.resolverRecoloreables(entrada)
     this.adjustCameraPlanes()
+    this.ajustarControles()
     await this.aplicarColoresDeTema(this.temaActual)
     await this.actualizar()
     if (opciones.encuadrar !== false) await this.fitToModel()
@@ -666,6 +966,58 @@ export class Viewer {
       if (!box.isEmpty()) total.union(box)
     }
     return total
+  }
+
+  /**
+   * Pone los limites de la camara a la escala de lo que hay montado.
+   *
+   * @thatopen configura los controles para edificios, y los rehace cada vez
+   * que se cambia de modo de navegacion: distancia al objetivo entre 1 y
+   * **300 m**, con `infinityDolly` para que la rueda siga haciendo algo mas
+   * alla de ese tope. En obra lineal eso rompe dos cosas a la vez.
+   *
+   * La vista panoramica, porque encuadrar un corredor de kilometros exige
+   * poner la camara a miles de metros del centro y el encuadre se recortaba a
+   * 300: el boton dejaba la camara mirando un trozo del proyecto, no el
+   * proyecto.
+   *
+   * Y la rueda, porque pasado ese tope `infinityDolly` deja de acercar la
+   * camara y lo que hace es empujar el objetivo. El paso deja de ser
+   * proporcional a lo que uno tiene delante y pasa a serlo a los 300 m del
+   * tope: a dos metros de un muro, cada tic daba un salto de decenas de
+   * metros y lo atravesaba. De ahi los saltos y que el elemento se quedara
+   * fuera de la vista.
+   *
+   * El tope pasa a ser cuatro veces la diagonal de lo montado: holgado para
+   * encuadrarlo entero —hace falta cerca de una diagonal— y dentro del plano
+   * lejano, que se calcula a cinco.
+   *
+   * En primera persona no se tocan: ese modo esta construido justamente sobre
+   * el tope fijo y `infinityDolly`, que es como la rueda hace avanzar.
+   */
+  private ajustarControles() {
+    const controles = this.world.camera.controls
+    if (this.navegacion === 'FirstPerson') {
+      controles.infinityDolly = true
+      controles.dollyToCursor = true
+      return
+    }
+
+    const caja = this.cajaTotal()
+    const diagonal = caja.isEmpty()
+      ? 1000
+      : caja.getSize(new THREE.Vector3()).length()
+
+    // La minima de la libreria (6 m) ahoga el zoom de cerca: la camara se topa
+    // con ella y el avance proporcional se queda en centimetros por tic.
+    controles.minDistance = 0.01
+    controles.maxDistance = Math.max(1000, diagonal * 4)
+    controles.infinityDolly = false
+    // El anclaje al cursor lo lleva esta clase (ver handleWheel) y no la
+    // libreria. La suya lleva una contabilidad propia del zoom pendiente que
+    // se corrompe en cuanto alguien mueve el objetivo por su cuenta —que es
+    // lo que hace cada clic— y el sintoma es justamente un salto.
+    controles.dollyToCursor = false
   }
 
   /**
@@ -757,6 +1109,34 @@ export class Viewer {
     }
   }
 
+  /**
+   * Cuanto se sale de la pantalla lo montado, en coordenadas normalizadas:
+   * 1 es justo el borde y por debajo de 1 cabe entero. Devuelve 99 si alguna
+   * esquina queda detras de la camara o pasado el plano lejano.
+   *
+   * Es la forma de comprobar que un encuadre encuadra de verdad. Mirar solo
+   * la distancia no vale: la libreria la recorta a su tope y la camara se
+   * queda corta sin decirlo.
+   */
+  getDesborde(): number {
+    const caja = this.cajaTotal()
+    if (caja.isEmpty()) return 0
+
+    const camara = this.world.camera.three
+    camara.updateMatrixWorld()
+    let peor = 0
+    for (let i = 0; i < 8; i++) {
+      const esquina = new THREE.Vector3(
+        i & 1 ? caja.max.x : caja.min.x,
+        i & 2 ? caja.max.y : caja.min.y,
+        i & 4 ? caja.max.z : caja.min.z,
+      ).project(camara)
+      if (esquina.z < -1 || esquina.z > 1) return 99
+      peor = Math.max(peor, Math.abs(esquina.x), Math.abs(esquina.y))
+    }
+    return peor
+  }
+
   /** Caja de todo lo montado. Para diagnostico y para las pruebas. */
   getCajaTotal(): THREE.Box3 {
     return this.cajaTotal()
@@ -780,6 +1160,7 @@ export class Viewer {
     // conserva, o los que siguen montados saltarian de sitio.
     if (this.modelos.size === 0) this.origenComun = null
     this.adjustCameraPlanes()
+    this.ajustarControles()
     await this.actualizar()
   }
 
@@ -791,6 +1172,7 @@ export class Viewer {
     this.modelos.clear()
     this.seleccionado = null
     this.sobrevolado = null
+    this.excluidos.clear()
     this.origenComun = null
     // Las mediciones cuelgan de una geometria que ya no esta; dejarlas
     // flotando en el vacio seria peor que perderlas.
@@ -1080,10 +1462,18 @@ export class Viewer {
    * devuelve su color de tema si le correspondia.
    */
   async highlight(ref: Ref | null) {
-    if (mismaRef(this.seleccionado, ref)) return
+    // Elegir uno deshace la seleccion multiple: si no, quedaria media
+    // ventana resaltada en azul sin que nada lo explique.
+    const habiaMarcados = this.marcados.size > 0
+    if (mismaRef(this.seleccionado, ref) && !habiaMarcados) return
+
     const afectados = [this.seleccionado, ref].filter(
       (x): x is Ref => x !== null,
     )
+    if (habiaMarcados) {
+      afectados.push(...[...this.marcados].map(desdeClave))
+      this.marcados.clear()
+    }
     this.seleccionado = ref
     await this.refrescarAspecto(afectados)
   }
@@ -1096,6 +1486,63 @@ export class Viewer {
     )
     this.sobrevolado = ref
     await this.refrescarAspecto(afectados)
+  }
+
+  /**
+   * Fija la seleccion multiple viva, la que deja una ventana de seleccion.
+   *
+   * Se separa del elemento seleccionado porque no son lo mismo: el panel de
+   * propiedades necesita uno solo, y una ventana puede traer treinta.
+   */
+  async setMarcados(refs: Ref[]) {
+    const nuevos = new Set(refs.map(claveRef))
+    const cambiados: Ref[] = []
+    for (const clave of this.marcados) {
+      if (!nuevos.has(clave)) cambiados.push(desdeClave(clave))
+    }
+    for (const r of refs) {
+      if (!this.marcados.has(claveRef(r))) cambiados.push(r)
+    }
+    this.marcados = nuevos
+    if (cambiados.length > 0) await this.refrescarAspecto(cambiados)
+  }
+
+  /**
+   * Fija que elementos quedan marcados como fuera del entregable.
+   *
+   * Se repinta solo lo que cambia de estado, no todo: en un modelo grande la
+   * lista de exclusion crece de cuarenta en cuarenta y repintar el modelo
+   * entero en cada anadido se nota.
+   */
+  async setExcluidos(refs: Ref[]) {
+    const nuevos = new Set(refs.map(claveRef))
+    const cambiados: Ref[] = []
+
+    for (const clave of this.excluidos) {
+      if (!nuevos.has(clave)) cambiados.push(desdeClave(clave))
+    }
+    for (const r of refs) {
+      if (!this.excluidos.has(claveRef(r))) cambiados.push(r)
+    }
+
+    this.excluidos = nuevos
+    if (cambiados.length > 0) await this.refrescarAspecto(cambiados)
+  }
+
+  /** Elementos marcados como fuera del entregable. */
+  getExcluidos(): Ref[] {
+    return [...this.excluidos].map(desdeClave)
+  }
+
+  /**
+   * Repone la marca de los excluidos.
+   *
+   * Hace falta despues de cualquier `resetHighlight` general, que se lleva
+   * por delante todo lo que viva en ese canal.
+   */
+  private async reponerExcluidos() {
+    if (this.excluidos.size === 0) return
+    await this.refrescarAspecto(this.getExcluidos())
   }
 
   /** Color de tema que le toca a un elemento, si le toca alguno. */
@@ -1126,9 +1573,17 @@ export class Viewer {
       await entrada.model.resetHighlight(ids)
       for (const id of ids) {
         const ref = { modelId, localId: id }
+        const clave = claveRef(ref)
+        const fuera = this.excluidos.has(clave)
+        const elegido = mismaRef(ref, this.seleccionado) || this.marcados.has(clave)
         if (mismaRef(ref, this.sobrevolado)) {
           await entrada.model.highlight([id], HOVER)
-        } else if (mismaRef(ref, this.seleccionado)) {
+        } else if (fuera) {
+          await entrada.model.highlight(
+            [id],
+            elegido ? EXCLUIDO_SELECCIONADO : EXCLUIDO,
+          )
+        } else if (elegido) {
           await entrada.model.highlight([id], HIGHLIGHT)
         } else {
           const color = this.colorDeTema(modelId, id)
@@ -1265,7 +1720,11 @@ export class Viewer {
 
   /** Modo de navegacion de la camara. */
   setNavigation(modo: Navegacion) {
+    this.navegacion = modo
     this.world.camera.set(modo)
+    // Cambiar de modo rehace los limites con los valores de la libreria; hay
+    // que volver a ponerlos a la escala del modelo.
+    this.ajustarControles()
   }
 
   /**
@@ -1301,7 +1760,9 @@ export class Viewer {
         const libres = ids.filter(
           (localId) =>
             !mismaRef({ modelId, localId }, this.seleccionado) &&
-            !mismaRef({ modelId, localId }, this.sobrevolado),
+            !mismaRef({ modelId, localId }, this.sobrevolado) &&
+            !this.excluidos.has(claveRef({ modelId, localId })) &&
+            !this.marcados.has(claveRef({ modelId, localId })),
         )
         if (libres.length === 0) continue
         if (tema === 'claro') {
@@ -1346,9 +1807,10 @@ export class Viewer {
     }
     this.seleccionado = null
     this.sobrevolado = null
-    // resetHighlight sin argumentos tambien se lleva los colores del tema,
-    // porque comparten canal; hay que reponerlos.
+    // resetHighlight sin argumentos tambien se lleva los colores del tema y
+    // la marca de los excluidos, porque comparten canal; hay que reponerlos.
     await this.aplicarColoresDeTema(this.temaActual)
+    await this.reponerExcluidos()
     await this.actualizar()
     await this.fitToModel()
   }
@@ -1522,6 +1984,8 @@ export class Viewer {
     this.modo = modo
     this.puntoA = null
     this.puntoCursor = null
+    this.ventanaDesde = null
+    if (this.cajaVentana) this.cajaVentana.style.display = 'none'
     if (modo === 'medir') void this.setHover(null)
     this.redibujarMediciones()
   }
@@ -1743,6 +2207,12 @@ export class Viewer {
   }
 
   dispose() {
+    this.container?.removeEventListener('wheel', this.handleWheel, true)
+    this.container?.removeEventListener('pointerdown', this.handleVentanaDown, true)
+    this.container?.removeEventListener('pointermove', this.handleVentanaMove, true)
+    this.container?.removeEventListener('pointerup', this.handleVentanaUp, true)
+    this.cajaVentana?.remove()
+    this.cajaVentana = null
     this.container?.removeEventListener('pointerdown', this.handlePointerDown)
     this.container?.removeEventListener('pointerup', this.handlePointerUp)
     this.container?.removeEventListener('pointermove', this.handlePointerMove)

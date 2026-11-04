@@ -215,3 +215,85 @@ mod pruebas {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// Resultado de quitar elementos de un IFC, para la interfaz.
+#[derive(Serialize)]
+pub struct InformeDepuracion {
+    pub eliminados: usize,
+    pub no_encontrados: Vec<String>,
+    pub relaciones_eliminadas: usize,
+    pub relaciones_reparadas: usize,
+    pub lineas_borradas: usize,
+    pub bytes_entrada: u64,
+    pub bytes_salida: u64,
+    pub bloqueos: Vec<String>,
+}
+
+/// Escribe una copia del IFC sin los elementos indicados.
+///
+/// Nunca toca el original: si el destino coincide con el origen se rechaza
+/// antes de leer nada. Un entregable se genera al lado del archivo bueno, no
+/// encima.
+#[tauri::command]
+pub fn depurar_ifc(
+    origen: String,
+    destino: String,
+    guids: Vec<String>,
+    nota: Option<String>,
+) -> Result<InformeDepuracion, String> {
+    if guids.is_empty() {
+        return Err("No hay ningun elemento marcado para quitar".into());
+    }
+
+    let ruta_origen = Path::new(&origen);
+    let ruta_destino = Path::new(&destino);
+    if mismo_archivo(ruta_origen, ruta_destino) {
+        return Err("El destino no puede ser el archivo original".into());
+    }
+
+    let datos = fs::read(ruta_origen)
+        .map_err(|e| format!("No se pudo leer '{origen}': {e}"))?;
+
+    let (informe, salida) = crate::depurar::depurar(&datos, &guids, nota.as_deref());
+
+    if !informe.bloqueos.is_empty() {
+        return Err(format!(
+            "No se puede generar el archivo sin arriesgar a dejarlo invalido:\n{}",
+            informe.bloqueos.join("\n")
+        ));
+    }
+
+    let bytes = salida.ok_or_else(|| {
+        "Ninguno de los elementos marcados esta en este archivo".to_string()
+    })?;
+
+    fs::write(ruta_destino, &bytes)
+        .map_err(|e| format!("No se pudo escribir '{destino}': {e}"))?;
+
+    Ok(InformeDepuracion {
+        eliminados: informe.eliminados.len(),
+        no_encontrados: informe.no_encontrados,
+        relaciones_eliminadas: informe.relaciones_eliminadas,
+        relaciones_reparadas: informe.relaciones_reparadas,
+        lineas_borradas: informe.lineas_borradas,
+        bytes_entrada: informe.bytes_entrada as u64,
+        bytes_salida: informe.bytes_salida as u64,
+        bloqueos: Vec::new(),
+    })
+}
+
+/// Compara rutas sin exigir que el destino exista todavia.
+fn mismo_archivo(a: &Path, b: &Path) -> bool {
+    let normal = |p: &Path| -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| {
+            match (p.parent(), p.file_name()) {
+                (Some(dir), Some(nombre)) => dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| dir.to_path_buf())
+                    .join(nombre),
+                _ => p.to_path_buf(),
+            }
+        })
+    };
+    normal(a) == normal(b)
+}

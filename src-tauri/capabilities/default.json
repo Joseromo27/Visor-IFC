@@ -9,6 +9,7 @@
     "core:default",
     "opener:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "dialog:allow-message",
     "fs:allow-applocaldata-read-recursive",
     "fs:allow-applocaldata-write-recursive",
@@ -19,6 +20,9 @@
     "process:allow-exit",
     "core:window:allow-set-size",
     "core:window:allow-inner-size",
-    "core:window:allow-scale-factor"
+    "core:window:allow-scale-factor",
+    "core:window:allow-is-maximized",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus"
   ]
 }

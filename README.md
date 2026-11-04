@@ -17,6 +17,11 @@ para que un modelo de kilometros se comporte.
   1000 m se recorta**, con lo que el visor muestra dos hilos sueltos en vez del
   modelo. `Viewer.adjustCameraPlanes` recalcula `near` y `far` a partir de la
   caja del modelo cada vez que se carga uno.
+- Los controles de camara nacen con la distancia al objetivo acotada **entre 1
+  y 300 metros**. Encuadrar un corredor de kilometros exige poner la camara a
+  miles de metros, y el encuadre se recortaba a 300: la vista panoramica
+  mostraba un trozo del proyecto. Ver [Zoom y vista
+  panoramica](#zoom-y-vista-panoramica).
 
 Se pueden montar varios IFC a la vez, cada uno en su posicion real, para ver
 como se cruzan las disciplinas. Ver [Varios modelos a la
@@ -104,7 +109,15 @@ visor identifica un elemento con `Ref = { modelId, localId }`.
 La barra tenia trece controles en una sola fila y ya no se leia. Los archivos
 quedan arriba, porque son el punto de partida, y debajo hay una **cinta
 siempre desplegada** con los grupos a la vista: visibilidad, transparencia,
-vistas, camara y medicion, cada uno con su rotulo debajo como en AutoCAD.
+vistas, camara, entregable y medicion, cada uno con su rotulo debajo como en
+AutoCAD.
+
+La cinta se mide y se adapta al ancho de la ventana en tres escalones: con
+sitio van los rotulos largos, al estrecharse se acortan y, cuando ya no cabe
+ningun grupo entero, se repliega a los menus desplegables de la version
+anterior. El ancho necesario se calcula sumando el de los hijos que no encogen,
+y cada escalon recuerda el umbral en el que entro para no oscilar entre dos
+disposiciones al arrastrar el borde de la ventana.
 
 Primero fueron dos menus desplegables, y duraron una version. Trabajando de
 verdad con un modelo abierto casi todo es aislar, ocultar y transparentar una
@@ -192,6 +205,109 @@ No hizo falta subir @thatopen a 3.6 ni traer `components-front`: el enganche
 (`raycastWithSnapping`) y el volumen por elemento (`MeasurementUtils`) ya
 estaban en las versiones instaladas, y evitarlo ahorro invalidar el cache de
 conversion de todos los modelos.
+
+### Seleccion por ventana
+
+Manteniendo Mayusculas —o con el boton "Ventana" fijado, para no tener que
+sujetar la tecla— arrastrar dibuja un rectangulo y se queda con todo lo que
+toca. Marcar elementos de uno en uno era el cuello de botella para preparar un
+entregable.
+
+La ventana atrapa lo que **toca**, no solo lo que encierra entero
+(`fullyIncluded: false`). En obra lineal casi nada cabe completo en pantalla y
+exigirlo haria que una ventana sobre un muro de 200 m no atrapara nada. A
+cambio, un barrido amplio se trae mas de lo que uno espera, y por eso lo que se
+va a quitar se revisa en una lista antes de exportar.
+
+Los eventos de puntero se escuchan **en fase de captura sobre el contenedor y
+se detienen ahi**: camera-controls escucha en el lienzo, que esta por debajo, y
+si el evento le llega empieza a orbitar mientras se dibuja el rectangulo. La
+prueba lo comprueba midiendo que la camara no se haya movido ni un centimetro
+al terminar el arrastre.
+
+### Zoom y vista panoramica
+
+La rueda de camera-controls es geometrica: cada tic multiplica por un factor
+fijo la distancia al objetivo. El paso vale, por tanto, lo que valga esa
+distancia, de modo que **donde este el objetivo es lo que decide si la
+navegacion se siente bien**. Con el objetivo en el centro del proyecto —que es
+donde lo deja un encuadre general— uno avanza a razon de cientos de metros
+mientras mira un sumidero a dos.
+
+El objetivo se ancla por eso en lo que hay bajo el cursor, reutilizando el
+punto que ya resuelve el seguimiento del cursor en vez de tirar un rayo nuevo:
+el rayo nuevo tarda decenas de milisegundos y llegaba con el zoom ya en marcha,
+y como `setOrbitPoint` reescribe la distancia al objetivo de golpe, aterrizar a
+mitad de un gesto cortaba en seco la animacion en curso. El anclaje va ademas
+**en fase de captura**, antes que la libreria: escuchando despues, el primer
+tic de cada gesto se daba siempre con la distancia vieja.
+
+Lo que estaba detras de los saltos, sin embargo, eran los limites que
+@thatopen le pone a la camara, y que **rehace cada vez que se cambia de modo de
+navegacion**: objetivo entre 1 y 300 m, con `infinityDolly` para que la rueda
+siga haciendo algo mas alla de ese tope. Pasado el tope, `infinityDolly` deja
+de acercar la camara y lo que hace es empujar el objetivo: el paso dejaba de
+ser una fraccion de lo que uno tiene delante y pasaba a serlo de los 300 m del
+tope, asi que a dos metros de un muro un tic lo atravesaba. Y el mismo tope
+recortaba el encuadre general, que en el modelo de canales necesita 15.827 m.
+
+`Viewer.ajustarControles` pone el tope en cuatro veces la diagonal de lo
+montado — holgado para encuadrarlo entero, que necesita cerca de una, y dentro
+del plano lejano, que se calcula a cinco —, baja la distancia minima de 6 m a
+1 cm y apaga `infinityDolly`. Se reaplica al montar, al desmontar y despues de
+cada cambio de modo. En **primera persona no se tocan**: ese modo esta
+construido justamente sobre el tope fijo y `infinityDolly`, que es como la
+rueda hace avanzar.
+
+Tambien se apaga `dollyToCursor`, el seguimiento lateral del cursor de la
+libreria. El zoom acerca en linea recta hacia donde mira la camara y la
+referencia que sale del cursor es la profundidad, no la direccion. Se pierde
+que el punto apuntado quede clavado bajo el puntero; se gana que el avance sea
+el mismo siempre.
+
+Las medidas, girando la rueda tic a tic desde la vista general: 2930, 2392,
+1948, 1588, 1293, 1053, 858, 698, 569, 463, 377 y 308 metros, un factor
+constante de 0,82 y ningun repunte. La prueba comprueba las dos cosas por
+separado: que ningun tic se coma mas de la mitad de la distancia al objetivo, y
+que de un tic al siguiente el paso nunca crezca. El encuadre no se comprueba
+por la distancia sino proyectando las ocho esquinas de la caja del modelo, que
+es lo unico que distingue "encuadra" de "la libreria recorto la distancia y no
+lo dijo".
+
+## Entregable depurado
+
+Un modelo exportado puede traer algo que no deberia ir: una obra de arte mal
+disenada, un elemento duplicado. Corregirlo en el software de origen y volver a
+exportar cuesta horas. Esto permite escribir **una copia del IFC sin esos
+elementos** para entregarla ya, y no sustituye a corregir el modelo de origen.
+
+Se marcan elementos con "Excluir seleccion" —del arbol, del modelo, por ventana
+o por similares—, se revisan en una lista agrupada por archivo y se exporta uno
+a uno. Los excluidos se ven en el modelo en rojo, o naranja si ademas estan
+seleccionados, porque fiarse de recordar que se marco hace diez minutos no es
+forma de preparar lo que se le manda a un cliente.
+
+El filtro esta en Rust (`src-tauri/src/depurar.rs`) y trabaja sobre el texto
+STEP, no sobre el modelo cargado: lo que se entrega tiene que ser el archivo
+original menos lo pedido, no una reserializacion. Indexa las entidades
+respetando cadenas entrecomilladas y comentarios, localiza los `GlobalId`
+marcados y **arrastra en cascada las relaciones**: si una `IFCREL*` referencia
+el elemento en un campo escalar, se va entera; si lo referencia dentro de una
+lista, se reescribe la lista sin el, y solo se va si queda vacia. Las entidades
+que no cambian se copian byte a byte, y en la cabecera queda un comentario con
+la fecha, el archivo de origen y los GUID retirados.
+
+Si aparece un caso que el filtro no sabe resolver, **no escribe nada** y lo
+dice. Un filtro de texto que se equivoca se lleva por delante una relacion
+compartida y tumba elementos que nadie marco, y eso mirando el visor no se ve.
+
+La prueba no comprueba que salga un archivo: vuelve a convertir el depurado y
+compara el conjunto de GUID con el del original menos los pedidos — en el
+modelo de canales, 1311 elementos, faltan 0 y sobran 0.
+
+El archivo **no se encoge**: la geometria que se queda huerfana al retirar un
+elemento sigue dentro. Quitarla exige recorrer el grafo entero y es un trabajo
+aparte; el entregable sale correcto, no mas pequeno.
 
 ## Cerrar y volver a abrir
 
@@ -382,12 +498,15 @@ src/
   App.tsx                       interfaz principal
   SelfTest.tsx                  prueba de humo del flujo completo
   UiTest.tsx                    prueba sobre la interfaz real, con clics
+  CargaTest.tsx                 prueba de capacidad: monta todos los IFC de una
+                                carpeta y mide memoria y tiempos
   components/ModelTree.tsx      arbol jerarquico, montado de forma perezosa
   components/PropertiesPanel.tsx  property sets del elemento seleccionado
   components/Toolbar.tsx        fila superior: archivos y opciones
   components/Cinta.tsx          cinta desplegada con los grupos de trabajo
   components/PanelSimilares.tsx eleccion de criterio para buscar parecidos
   components/CapaMediciones.tsx rotulos de las medidas, encima del lienzo
+  components/PanelEntregable.tsx  revision y exportacion del IFC depurado
   lib/bridge.ts                 protocolo del SharedArrayBuffer
   lib/conversion.ts             dialogo, cache y orquestacion del worker
   lib/tree.ts                   aplanado del arbol espacial, una raiz por archivo
@@ -398,6 +517,7 @@ src/
   workers/ifcConverter.worker.ts  conversion IFC -> Fragments
 src-tauri/
   src/commands.rs               metadatos, ruta de cache y lectura por trozos
+  src/depurar.rs                filtro STEP: copia el IFC sin unos elementos
   src/lib.rs                    registro de plugins
 scripts/copy-assets.mjs         copia los .wasm y el worker a public/
 scripts/dev.ps1                 entorno del toolchain portable en Windows

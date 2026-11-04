@@ -72,6 +72,9 @@ interface Props {
   onCambiarModo: (modo: ModoVisor) => void
   onBorrarMedicion: (id: number) => void
   onBorrarMediciones: () => void
+  onExcluir: () => void
+  onAbrirEntregable: () => void
+  excluidos: number
 }
 
 type Grupo = { clave: string; titulo: string; contenido: ReactNode }
@@ -105,6 +108,16 @@ function construirGrupos(p: Props, compacta: boolean): Grupo[] {
           </button>
           <button className="btn" onClick={p.onMostrarTodo} disabled={inactivo}>
             {et('Mostrar todo', 'Mostrar')}
+          </button>
+          <button
+            className={`btn${p.modo === 'ventana' ? ' is-activo' : ''}`}
+            onClick={() =>
+              p.onCambiarModo(p.modo === 'ventana' ? 'seleccion' : 'ventana')
+            }
+            disabled={inactivo}
+            title="Selecciona varios arrastrando un rectangulo. Tambien sirve mantener Mayusculas mientras arrastras"
+          >
+            Ventana
           </button>
           <button
             className="btn"
@@ -227,6 +240,30 @@ function construirGrupos(p: Props, compacta: boolean): Grupo[] {
               ))}
             </select>
           </label>
+        </>
+      ),
+    },
+    {
+      clave: 'entregable',
+      titulo: 'Entregable',
+      contenido: (
+        <>
+          <button
+            className="btn"
+            onClick={p.onExcluir}
+            disabled={sinSeleccion}
+            title="Marca la seleccion para que no salga en el entregable"
+          >
+            {et('Excluir seleccion', 'Excluir')}
+          </button>
+          <button
+            className="btn"
+            onClick={p.onAbrirEntregable}
+            disabled={inactivo}
+            title="Revisa lo marcado y exporta el IFC sin esos elementos"
+          >
+            {p.excluidos > 0 ? `Revisar (${p.excluidos})` : 'Revisar'}
+          </button>
         </>
       ),
     },

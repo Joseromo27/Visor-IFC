@@ -8,6 +8,7 @@
 // Se activa con VITE_SELFTEST_UI. En un build normal no se incluye.
 
 import { useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { exit } from '@tauri-apps/plugin-process'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import * as THREE from 'three'
@@ -282,8 +283,15 @@ export default function UiTest({ path }: { path: string }) {
               c.dispatchEvent(new PointerEvent('pointermove', {
                 clientX: punto.x, clientY: punto.y, bubbles: true, pointerId: 1,
               }))
-              await esperar(700)
-              const marcados = await visor.getHighlighted()
+              // Con holgura: el seguimiento del cursor va limitado en el
+              // tiempo y no se solapa consigo mismo, asi que una consulta
+              // puede tardar bastante mas de lo normal si la maquina esta
+              // ocupada. Con una espera fija esto fallaba de vez en cuando.
+              let marcados = await visor.getHighlighted()
+              for (let i = 0; i < 8 && marcados.length === 0; i++) {
+                await esperar(250)
+                marcados = await visor.getHighlighted()
+              }
               // Que resalte justo el objetivo no esta garantizado: puede
               // haber otro elemento delante, y resaltar ese es correcto. Se
               // deja como dato, no como fallo.
@@ -476,13 +484,37 @@ export default function UiTest({ path }: { path: string }) {
           }
 
           const ventana = getCurrentWindow()
+          // Minimizada, el area util es 0x0, setSize no hace nada y el
+          // WebView conserva la disposicion anterior: se medirian siempre los
+          // mismos pixeles y la prueba acusaria un fallo que no existe.
+          await ventana.unminimize()
+          await ventana.setFocus()
+          await esperar(500)
           const tamanoOriginal = await ventana.innerSize()
           const escala = await ventana.scaleFactor()
           const anchear = async (ancho: number) => {
-            await ventana.setSize(new LogicalSize(ancho, 900))
+            try {
+              await ventana.setSize(new LogicalSize(ancho, 900))
+            } catch (err) {
+              decir(`setSize(${ancho}) lanzo: ${err}`)
+            }
             // Dos cosas tienen que asentarse: el redimensionado del sistema y
             // la remedida de la barra, que ocurre en el siguiente pintado.
             await esperar(900)
+            const real = await ventana.innerSize()
+            decir(
+              `ventana pedida ${ancho} -> interior ${real.width}x${real.height} fisicos,` +
+                ` escala ${escala}, maximizada ${await ventana.isMaximized()},` +
+                ` lienzo ${cinta()?.clientWidth} px`,
+            )
+          }
+
+          const visible = (await ventana.innerSize()).width > 0
+          if (!visible) {
+            decir(
+              'NOTA: la ventana no esta visible, no se puede medir como se' +
+                ' adapta la barra al ancho',
+            )
           }
 
           await anchear(1440)
@@ -504,7 +536,7 @@ export default function UiTest({ path }: { path: string }) {
           await anchear(780)
           const estrechaDisposicion = disposicion()
           check(
-            estrechaDisposicion === 'menus',
+            !visible || estrechaDisposicion === 'menus',
             'con la ventana estrecha la barra pasa a menus desplegables',
             `disposicion ${estrechaDisposicion}`,
           )
@@ -520,10 +552,11 @@ export default function UiTest({ path }: { path: string }) {
           botonMenu?.click()
           await esperar(300)
           check(
-            !!document.querySelector('.menu-panel') &&
-              [...document.querySelectorAll('.menu-panel button')].some(
-                (b) => b.textContent?.trim() === 'Aislar',
-              ),
+            !visible ||
+              (!!document.querySelector('.menu-panel') &&
+                [...document.querySelectorAll('.menu-panel button')].some(
+                  (b) => b.textContent?.trim() === 'Aislar',
+                )),
             'el desplegable conserva los controles de la cinta',
           )
           document.dispatchEvent(
@@ -539,7 +572,7 @@ export default function UiTest({ path }: { path: string }) {
           )
           await esperar(900)
           check(
-            disposicion() !== 'menus' && !desborda(),
+            !visible || (disposicion() !== 'menus' && !desborda()),
             'al volver a ensanchar, la barra vuelve a desplegarse',
             `disposicion ${disposicion()}`,
           )
@@ -1027,6 +1060,336 @@ export default function UiTest({ path }: { path: string }) {
             decir('sin colores de tema que preservar en este modelo')
           }
           v2.setTheme('oscuro')
+        }
+
+        // --- Seleccion por ventana y marca de los excluidos ---
+        {
+          const vs = window.__pruebaVisor!()!
+          const lienzoS = document.querySelector<HTMLCanvasElement>(
+            '.canvas-host canvas',
+          )!
+          const idsS = vs.getRefsWithGeometry()
+
+          // Acercarse a un elemento para tener geometria en pantalla: con el
+          // modelo entero a la vista no hay nada que atrapar.
+          await vs.fitToItems([idsS[0]])
+          await esperar(2000)
+
+          const cajaS = lienzoS.getBoundingClientRect()
+          const arrastrar = async (
+            x1: number,
+            y1: number,
+            x2: number,
+            y2: number,
+          ) => {
+            const base = { bubbles: true, cancelable: true, pointerId: 1 }
+            lienzoS.dispatchEvent(
+              new PointerEvent('pointerdown', {
+                ...base, clientX: x1, clientY: y1, button: 0, buttons: 1,
+                shiftKey: true,
+              }),
+            )
+            lienzoS.dispatchEvent(
+              new PointerEvent('pointermove', {
+                ...base, clientX: x2, clientY: y2, buttons: 1, shiftKey: true,
+              }),
+            )
+            lienzoS.dispatchEvent(
+              new PointerEvent('pointerup', {
+                ...base, clientX: x2, clientY: y2, button: 0, shiftKey: true,
+              }),
+            )
+            await esperar(900)
+          }
+
+          await vs.highlight(null)
+          await esperar(300)
+          await arrastrar(
+            cajaS.left + cajaS.width * 0.2,
+            cajaS.top + cajaS.height * 0.2,
+            cajaS.left + cajaS.width * 0.8,
+            cajaS.top + cajaS.height * 0.8,
+          )
+
+          const atrapados = await vs.getHighlighted()
+          check(
+            atrapados.length > 1,
+            'arrastrando con Mayusculas se seleccionan varios de una vez',
+            `${atrapados.length} elementos en la ventana`,
+          )
+
+          // Y la ventana no puede orbitar la camara a la vez que selecciona.
+          const camaraAntes = vs.getCameraState().posicion.clone()
+          await arrastrar(
+            cajaS.left + cajaS.width * 0.3,
+            cajaS.top + cajaS.height * 0.3,
+            cajaS.left + cajaS.width * 0.7,
+            cajaS.top + cajaS.height * 0.7,
+          )
+          const movida = camaraAntes.distanceTo(vs.getCameraState().posicion)
+          check(
+            movida < 0.5,
+            'dibujar la ventana no mueve la camara',
+            `la camara se movio ${movida.toFixed(2)} m`,
+          )
+
+          // Marca de los excluidos: tiene que verse, y verse distinta.
+          // Se suelta antes la seleccion de la ventana: comparten canal, y si
+          // no, no se sabria cual de los dos estados deja cada marca.
+          await vs.setMarcados([])
+          await esperar(400)
+          const paraExcluir = idsS.slice(0, 3)
+          await vs.setExcluidos(paraExcluir)
+          await esperar(700)
+          // Se comprueba por el canal de resaltado y no por el color: la
+          // libreria solo deja leer el material propio del elemento, que no
+          // cambia aunque encima se le pinte una marca.
+          const marcadosFuera = (await vs.getHighlighted()).map(claveRef)
+          check(
+            paraExcluir.every((r) => marcadosFuera.includes(claveRef(r))),
+            'los elementos excluidos quedan marcados en el modelo',
+            `${marcadosFuera.length} marcados, se esperaban al menos` +
+              ` ${paraExcluir.length}`,
+          )
+
+          await vs.setExcluidos([])
+          await esperar(700)
+          const tras = (await vs.getHighlighted()).map(claveRef)
+          check(
+            !paraExcluir.some((r) => tras.includes(claveRef(r))),
+            'al sacarlos de la lista se les quita la marca',
+            `quedan ${tras.length} marcados`,
+          )
+          await vs.setMarcados([])
+          await esperar(300)
+        }
+
+        // --- Vista panoramica y zoom ---
+        //
+        // Dos averias con la misma raiz: los limites que la libreria le pone
+        // a la camara estan pensados para un edificio —objetivo entre 1 y
+        // 300 m— y este modelo mide kilometros.
+        //
+        // La panoramica no encuadraba el proyecto porque el encuadre se
+        // recortaba a esos 300 m. Y la rueda saltaba porque, pasado el tope,
+        // `infinityDolly` deja de acercar la camara y lo que hace es empujar
+        // el objetivo: el paso dejaba de valer una fraccion de lo que uno
+        // tiene delante y pasaba a valer una fraccion de los 300 m del tope,
+        // asi que a dos metros de un muro un tic lo atravesaba.
+        {
+          const vn = window.__pruebaVisor!()!
+          await vn.resetView()
+          await esperar(2000)
+
+          const desborde = vn.getDesborde()
+          check(
+            desborde <= 1.05,
+            'la vista panoramica encuadra el proyecto entero',
+            `la esquina mas lejana cae a ${desborde.toFixed(2)} del centro` +
+              ' (1,00 es el borde de la pantalla)',
+          )
+
+          const lienzoN = document.querySelector<HTMLCanvasElement>(
+            '.canvas-host canvas',
+          )!
+          const cajaN = lienzoN.getBoundingClientRect()
+          const cx = cajaN.left + cajaN.width / 2
+          const cy = cajaN.top + cajaN.height / 2
+
+          const rueda = async (veces: number, reposo: number) => {
+            for (let i = 0; i < veces; i++) {
+              lienzoN.dispatchEvent(
+                new WheelEvent('wheel', {
+                  clientX: cx,
+                  clientY: cy,
+                  deltaY: -120,
+                  bubbles: true,
+                  cancelable: true,
+                }),
+              )
+              await esperar(30)
+            }
+            await esperar(reposo)
+          }
+
+          // Tic a tic, con la camara parada entre uno y otro: asi es como se
+          // mira un detalle, y es donde se notaban los saltos.
+          const pasos: number[] = []
+          const hasta: number[] = []
+          let antes = vn.getCameraState()
+          for (let i = 0; i < 12; i++) {
+            await rueda(1, 500)
+            const ahora = vn.getCameraState()
+            pasos.push(ahora.posicion.distanceTo(antes.posicion))
+            hasta.push(antes.distancia)
+            antes = ahora
+          }
+          decir(
+            `zoom tic a tic (m recorridos): ${pasos
+              .map((d) => d.toFixed(1))
+              .join(', ')}`,
+          )
+          decir(
+            `distancia al objetivo antes de cada tic (m): ${hasta
+              .map((d) => d.toFixed(1))
+              .join(', ')}`,
+          )
+
+          // Un tic se come una fraccion de lo que hay hasta el objetivo.
+          // Comerse mas de la mitad es el salto que se denuncia.
+          const saltos = pasos.filter((p, i) => p > hasta[i] * 0.5)
+          check(
+            saltos.length === 0,
+            'ningun tic de rueda se lleva por delante lo que hay delante',
+            `${saltos.length} de ${pasos.length} tics pasan de la mitad de la` +
+              ' distancia al objetivo',
+          )
+
+          // Y de un tic al siguiente el paso cambia poco: el avance es
+          // geometrico, cada uno vale algo menos que el anterior. Un repunte
+          // es el rebote.
+          const repunte = Math.max(
+            ...pasos.slice(1).map((p, i) => (pasos[i] > 0 ? p / pasos[i] : 99)),
+          )
+          check(
+            repunte < 1.6,
+            'el zoom avanza parejo, sin rebotes',
+            `el mayor repunte entre dos tics es x${repunte.toFixed(2)}`,
+          )
+
+          // Y en tandas seguidas, que es como se recorre distancia: tiene que
+          // seguir avanzando por mucho que uno se acerque.
+          const partida = vn.getCameraState()
+          const avances: number[] = []
+          let previa = partida.posicion.clone()
+          for (let tanda = 0; tanda < 4; tanda++) {
+            await rueda(10, 900)
+            const ahora = vn.getCameraState().posicion.clone()
+            avances.push(ahora.distanceTo(previa))
+            previa = ahora
+          }
+          decir(
+            `zoom por tandas de 10 (m recorridos): ${avances
+              .map((d) => d.toFixed(1))
+              .join(', ')}`,
+          )
+          const ultima = avances[avances.length - 1]
+          check(
+            ultima > 0.05,
+            'la rueda sigue avanzando por mucho que uno se acerque',
+            `primera tanda ${avances[0].toFixed(1)} m, ultima ${ultima.toFixed(2)} m`,
+          )
+
+          // Y despues de todo ese zoom, la panoramica tiene que volver a
+          // encuadrarlo todo: es el caso en el que fallaba.
+          await vn.resetView()
+          await esperar(2000)
+          const vuelta = vn.getDesborde()
+          check(
+            vuelta <= 1.05,
+            'la panoramica vuelve a encuadrar despues de hacer zoom',
+            `la esquina mas lejana cae a ${vuelta.toFixed(2)} del centro`,
+          )
+        }
+
+        // --- Entregable depurado ---
+        //
+        // Lo que hay que demostrar no es que el archivo salga, sino que salga
+        // exactamente el original menos lo pedido. Un filtro de texto mal
+        // hecho se lleva por delante una relacion compartida y tumba
+        // elementos que nadie marco, y eso mirando el visor no se ve: los
+        // elementos que faltan simplemente no estan.
+        {
+          await window.__pruebaAbrir!(path)
+          await esperar(1200)
+          const v3 = window.__pruebaVisor!()!
+
+          const antes = v3.getRefsWithGeometry()
+          const guidsAntes = await v3.getGuids(antes)
+          decir(`entregable: el original trae ${antes.length} elementos con geometria`)
+
+          // Se quita una familia entera, que es el caso real: "esta OA sobra".
+          const familia = await v3.buscarSimilares(antes[0])
+          const aQuitar = (familia?.porNombre ?? []).slice(0, 40)
+          check(
+            aQuitar.length > 0,
+            'hay una familia que excluir del entregable',
+            `${aQuitar.length} elementos de "${familia?.nombre}"`,
+          )
+
+          if (aQuitar.length > 0) {
+            const guidsQuitados = await v3.getGuids(aQuitar)
+            const marcados = [...guidsQuitados.values()]
+            const modelo = v3.getModelos()[0]
+            const destino = modelo.ruta.replace(/\.ifc$/i, '_prueba_depurado.ifc')
+
+            let informe: {
+              eliminados: number
+              relaciones_reparadas: number
+              relaciones_eliminadas: number
+              bytes_entrada: number
+              bytes_salida: number
+              no_encontrados: string[]
+            } | null = null
+            try {
+              informe = await invoke('depurar_ifc', {
+                origen: modelo.ruta,
+                destino,
+                guids: marcados,
+                nota: 'Prueba automatica',
+              })
+            } catch (err) {
+              check(false, 'se puede escribir el entregable depurado', String(err))
+            }
+
+            if (informe) {
+              decir(
+                `entregable: ${informe.eliminados} fuera,` +
+                  ` ${informe.relaciones_reparadas} relaciones ajustadas,` +
+                  ` ${informe.relaciones_eliminadas} retiradas,` +
+                  ` ${(informe.bytes_entrada / 1024 ** 2).toFixed(1)} MB ->` +
+                  ` ${(informe.bytes_salida / 1024 ** 2).toFixed(1)} MB`,
+              )
+              check(
+                informe.eliminados === marcados.length &&
+                  informe.no_encontrados.length === 0,
+                'se quitan exactamente los elementos marcados',
+                `${informe.eliminados} de ${marcados.length} pedidos`,
+              )
+              check(
+                informe.bytes_salida < informe.bytes_entrada,
+                'el archivo depurado es mas pequeno que el original',
+              )
+
+              // Y la comprobacion que importa: abrirlo y comparar los GUID.
+              await window.__pruebaAbrir!(destino)
+              await esperar(1500)
+              const v4 = window.__pruebaVisor!()!
+              const despues = v4.getRefsWithGeometry()
+              const guidsDespues = new Set(
+                (await v4.getGuids(despues)).values(),
+              )
+
+              const quitados = new Set(marcados)
+              const esperados = new Set(
+                [...guidsAntes.values()].filter((g) => !quitados.has(g)),
+              )
+              const sobran = [...guidsDespues].filter((g) => !esperados.has(g))
+              const faltan = [...esperados].filter((g) => !guidsDespues.has(g))
+
+              check(
+                sobran.length === 0 && faltan.length === 0,
+                'el depurado es el original menos lo marcado, ni un elemento mas',
+                `${guidsDespues.size} elementos: faltan ${faltan.length},` +
+                  ` sobran ${sobran.length}` +
+                  (faltan.length > 0 ? ` (p.ej. ${faltan.slice(0, 3).join(', ')})` : ''),
+              )
+              check(
+                ![...guidsDespues].some((g) => quitados.has(g)),
+                'ninguno de los excluidos sobrevive en el archivo',
+              )
+            }
+          }
         }
 
         decir(fallos === 0 ? '=== UITEST OK ===' : `=== UITEST CON ${fallos} FALLAS ===`)

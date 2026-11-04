@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ItemData } from '@thatopen/fragments'
 import { invoke } from '@tauri-apps/api/core'
+import { save } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 
 import { CapaMediciones } from './components/CapaMediciones'
+import { PanelEntregable, type Excluido } from './components/PanelEntregable'
 import { Cinta } from './components/Cinta'
 import { ModelTree } from './components/ModelTree'
 import { PanelSimilares } from './components/PanelSimilares'
@@ -27,6 +29,7 @@ import {
 import { checkForUpdate, type UpdateInfo } from './lib/updater'
 import {
   claveRef,
+  mismaRef,
   Viewer,
   type Medicion,
   type ModeloMontado,
@@ -54,6 +57,18 @@ const formatDuration = (ms: number) => {
 }
 
 const formatCount = (n: number) => n.toLocaleString('es-CL')
+
+/** Lo que devuelve `depurar_ifc`. */
+interface InformeDepuracion {
+  eliminados: number
+  no_encontrados: string[]
+  relaciones_eliminadas: number
+  relaciones_reparadas: number
+  lineas_borradas: number
+  bytes_entrada: number
+  bytes_salida: number
+  bloqueos: string[]
+}
 
 interface ModelMeta {
   name: string
@@ -100,6 +115,12 @@ export default function App() {
   const [mediciones, setMediciones] = useState<Medicion[]>([])
   const [similares, setSimilares] = useState<ResumenSimilares | null>(null)
   const [buscandoSimilares, setBuscandoSimilares] = useState(false)
+
+  // Entregable depurado: lo que se va a quitar del IFC de origen.
+  const [excluidos, setExcluidos] = useState<Excluido[]>([])
+  const [panelEntregable, setPanelEntregable] = useState(false)
+  const [exportando, setExportando] = useState<string | null>(null)
+  const [mensaje, setMensaje] = useState<string | null>(null)
 
   const [update, setUpdate] = useState<UpdateInfo | null>(null)
   const [updateProgress, setUpdateProgress] = useState<number | null>(null)
@@ -156,6 +177,12 @@ export default function App() {
     // El visor es quien sabe cuando se cierra una medida o se descarga todo;
     // la interfaz solo refleja su lista.
     viewer.onMediciones = (lista) => setMediciones(lista)
+    viewer.onSeleccionMultiple = (refs) => {
+      setSelectedRefs(refs)
+      setSelected(null)
+      setItemData(null)
+      setAvisoClic(refs.length === 0)
+    }
     viewerRef.current = viewer
     setVisor(viewer)
     return () => {
@@ -309,10 +336,16 @@ export default function App() {
     }
   }, [openPath])
 
-  // Solo en modo prueba de interfaz: permite abrir un archivo sin pasar por
-  // el dialogo nativo, que no se puede automatizar.
+  // Solo en modo prueba: permite abrir un archivo sin pasar por el dialogo
+  // nativo, que no se puede automatizar. Lo usan tanto la prueba de interfaz
+  // como la de capacidad.
   useEffect(() => {
-    if (!import.meta.env.VITE_SELFTEST_UI) return
+    if (
+      !import.meta.env.VITE_SELFTEST_UI &&
+      !import.meta.env.VITE_SELFTEST_CARGA
+    ) {
+      return
+    }
     window.__pruebaAbrir = openPath
     window.__pruebaVisor = () => viewerRef.current
     return () => {
@@ -383,6 +416,12 @@ export default function App() {
     [ocultos],
   )
 
+  // La marca roja de lo que queda fuera del entregable la pinta el visor;
+  // aqui solo se le pasa la lista cada vez que cambia.
+  useEffect(() => {
+    void viewerRef.current?.setExcluidos(excluidos.map((e) => e.ref))
+  }, [excluidos])
+
   // --- Vistas, similares y medicion ----------------------------------------
 
   const handleVista = useCallback(
@@ -432,6 +471,88 @@ export default function App() {
           ),
         )
       })()
+    },
+    [],
+  )
+
+  // --- Entregable depurado -------------------------------------------------
+
+  /** Carpeta del archivo, para proponer el destino al lado del original. */
+  const carpetaDe = (ruta: string) => ruta.replace(/[^\\/]+$/, '')
+
+  const handleExcluirSeleccion = useCallback(async () => {
+    const viewer = viewerRef.current
+    if (!viewer || selectedRefs.length === 0) return
+
+    const guids = await viewer.getGuids(selectedRefs)
+    setExcluidos((previos) => {
+      const vistos = new Set(previos.map((e) => claveRef(e.ref)))
+      const nuevos = selectedRefs
+        .filter((r) => !vistos.has(claveRef(r)))
+        .map((r) => ({
+          ref: r,
+          nombre: viewer.getNombre(r),
+          guid: guids.get(claveRef(r)) ?? null,
+        }))
+      return [...previos, ...nuevos]
+    })
+    // Se abre la revision en el acto: marcar algo para que no llegue al
+    // cliente no deberia ser una accion silenciosa.
+    setPanelEntregable(true)
+  }, [selectedRefs])
+
+  const handleExportarEntregable = useCallback(
+    async (modelo: ModeloMontado, lista: Excluido[]) => {
+      const sinGuid = lista.filter((e) => !e.guid)
+      if (sinGuid.length > 0) {
+        setError(
+          `${sinGuid.length} de los elementos marcados no tienen GlobalId y no` +
+            ' se pueden localizar en el archivo. Quitalos de la lista.',
+        )
+        return
+      }
+
+      const base = modelo.nombre.replace(/\.ifc$/i, '')
+      const destino = await save({
+        title: 'Guardar entregable depurado',
+        defaultPath: `${carpetaDe(modelo.ruta)}${base}_depurado.ifc`,
+        filters: [{ name: 'Archivos IFC', extensions: ['ifc'] }],
+      })
+      if (!destino) return
+
+      setExportando(modelo.modelId)
+      setError(null)
+      setMensaje(null)
+      try {
+        const fecha = new Date().toLocaleDateString('es-CL')
+        const guids = lista.map((e) => e.guid!)
+        const informe = await invoke<InformeDepuracion>('depurar_ifc', {
+          origen: modelo.ruta,
+          destino,
+          guids,
+          // Trazabilidad dentro del propio archivo: quien lo reciba tiene que
+          // poder ver que es una copia filtrada y de que.
+          nota:
+            `Generado con Visor IFC el ${fecha} a partir de ${modelo.nombre}.` +
+            ` Se quitaron ${guids.length} elementos; el modelo de origen no fue` +
+            ` modificado. GlobalId retirados: ${guids.join(' ')}`,
+        })
+
+        const noEstaban = informe.no_encontrados.length
+        setMensaje(
+          `Entregable escrito: ${informe.eliminados} elementos fuera,` +
+            ` ${informe.relaciones_reparadas} relaciones ajustadas,` +
+            ` ${informe.relaciones_eliminadas} relaciones retiradas.` +
+            ` ${formatSize(informe.bytes_salida)} frente a ${formatSize(informe.bytes_entrada)}.` +
+            (noEstaban > 0
+              ? ` ${noEstaban} de los marcados no estaban en este archivo.`
+              : ''),
+        )
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setExportando(null)
+      }
     },
     [],
   )
@@ -609,6 +730,9 @@ export default function App() {
           onCambiarModo={handleCambiarModo}
           onBorrarMedicion={(id) => viewerRef.current?.borrarMedicion(id)}
           onBorrarMediciones={() => viewerRef.current?.borrarMediciones()}
+          onExcluir={() => void handleExcluirSeleccion()}
+          onAbrirEntregable={() => setPanelEntregable(true)}
+          excluidos={excluidos.length}
           onAislar={act(async (v) => {
             await v.isolate(selectedRefs)
             sincronizarOcultos(v)
@@ -664,6 +788,15 @@ export default function App() {
         </div>
       )}
 
+      {mensaje && (
+        <div className="banner banner-ok">
+          <span>{mensaje}</span>
+          <button className="btn btn-small" onClick={() => setMensaje(null)}>
+            Cerrar
+          </button>
+        </div>
+      )}
+
       {error && (
         <div className="banner banner-error">
           <span>{error}</span>
@@ -691,7 +824,7 @@ export default function App() {
 
         <div
           className={`viewport${dragging ? ' is-dragging' : ''}${
-            modo === 'medir' ? ' is-midiendo' : ''
+            modo === 'medir' || modo === 'ventana' ? ' is-midiendo' : ''
           }`}
         >
           <div ref={canvasRef} className="canvas-host" />
@@ -791,6 +924,34 @@ export default function App() {
           </div>
         </aside>
       </main>
+
+      {panelEntregable && (
+        <PanelEntregable
+          excluidos={excluidos}
+          modelos={modelos}
+          exportando={exportando}
+          onQuitar={(ref) =>
+            setExcluidos((previos) =>
+              previos.filter((e) => !mismaRef(e.ref, ref)),
+            )
+          }
+          onVaciar={() => setExcluidos([])}
+          onVer={(refs) => {
+            const viewer = viewerRef.current
+            if (!viewer) return
+            setSelectedRefs(refs)
+            void (async () => {
+              await viewer.isolate(refs)
+              await viewer.fitToItems(refs)
+              sincronizarOcultos(viewer)
+            })()
+          }}
+          onExportar={(modelo, lista) =>
+            void handleExportarEntregable(modelo, lista)
+          }
+          onCerrar={() => setPanelEntregable(false)}
+        />
+      )}
 
       {similares && (
         <PanelSimilares

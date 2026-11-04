@@ -8,6 +8,7 @@
 #   .\scripts\dev.ps1                      # aplicacion normal
 #   .\scripts\dev.ps1 -SelfTest "C:\m.ifc" # prueba de humo y salida
 #   .\scripts\dev.ps1 -Build               # instaladores de release
+#   .\scripts\dev.ps1 -Carga a.ifc,b.ifc    # prueba de capacidad
 
 [CmdletBinding()]
 param(
@@ -16,6 +17,8 @@ param(
   [string] $SelfTest2,
   # Monta <App /> de verdad en vez del banco de humo.
   [switch] $Ui,
+  # Prueba de capacidad: monta todos estos IFC en una sola sesion.
+  [string[]] $Carga,
   [switch] $Build
 )
 
@@ -98,6 +101,13 @@ try {
       }
       $env:VITE_SELFTEST_PATH2 = (Resolve-Path -LiteralPath $SelfTest2).Path
       Write-Host "Segundo modelo: $env:VITE_SELFTEST_PATH2" -ForegroundColor DarkGray
+    }
+    if ($Carga) {
+      foreach ($c in $Carga) {
+        if (-not (Test-Path -LiteralPath $c)) { throw "No existe el archivo IFC: $c" }
+      }
+      $env:VITE_SELFTEST_CARGA = ($Carga | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }) -join ';'
+      Write-Host "Prueba de capacidad con $($Carga.Count) archivos" -ForegroundColor DarkGray
     }
     if ($Ui) {
       $env:VITE_SELFTEST_UI = '1'

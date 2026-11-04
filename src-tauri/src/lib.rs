@@ -4,6 +4,7 @@
 // arma el shell nativo: plugins de dialogo, filesystem, actualizador y log.
 
 mod commands;
+mod depurar;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,6 +77,7 @@ pub fn run() {
             commands::cache_read,
             commands::read_chunk,
             commands::archivo_pendiente,
+            commands::depurar_ifc,
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la aplicacion");

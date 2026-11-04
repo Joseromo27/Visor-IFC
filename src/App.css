@@ -1099,3 +1099,93 @@ body {
 .menu-panel .deslizador input[type='range'] {
   width: 110px;
 }
+
+/* --- Entregable depurado --------------------------------------------------- */
+
+.banner-ok {
+  background: var(--aviso-fondo);
+}
+
+.modal-ancho {
+  width: min(680px, 92vw);
+}
+
+.grupo-entregable + .grupo-entregable {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.entregable-cabecera {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.entregable-cabecera strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.entregable-cuenta {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.entregable-acciones {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.lista-excluidos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.lista-excluidos li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 6px;
+  background: var(--bg-raised);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.excluido-nombre {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* El GlobalId es lo que viaja al archivo: se muestra para poder cotejarlo
+   contra el modelo de origen cuando se corrija de verdad. */
+.excluido-guid {
+  color: var(--text-dim);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+/* Rectangulo de la seleccion por ventana. Lo dibuja el visor, que es quien
+   sigue el puntero; aqui solo esta su aspecto. */
+.ventana-seleccion {
+  position: absolute;
+  display: none;
+  border: 1px solid var(--accent);
+  background: var(--seleccion);
+  pointer-events: none;
+  z-index: 4;
+}
